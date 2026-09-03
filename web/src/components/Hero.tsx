@@ -123,8 +123,8 @@ export function Hero() {
             <b className="t-orange">t+{REAL_DEMO.swap_completed_at_s}s</b>
             {"\n"}versions before    {"{"}v1: 2001, v2: 1{"}"}
             {"\n"}versions after     {"{"}v2: 1998{"}"}
-            {"\n"}shadow report      n=1000 mean|d|={REAL_DEMO.shadow_report.mean_abs} p95|d|=
-            {REAL_DEMO.shadow_report.p95_abs} beyond 2.0min={REAL_DEMO.shadow_report.beyond_2min}
+            {"\n"}shadow report      n=1000 mean|d|={REAL_DEMO.shadow_report.mean_abs} p95|d|={REAL_DEMO.shadow_report.p95_abs}
+            {"\n"}                   beyond 2.0min={REAL_DEMO.shadow_report.beyond_2min}
           </pre>
           <div className="terminal-split" aria-label="Per-second version split of the real run">
             {DEMO_SPLIT.map((c, s) => (
