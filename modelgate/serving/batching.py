@@ -38,7 +38,8 @@ class BatchResult:
 class _Queue:
     model: object
     items: list[tuple[torch.Tensor, asyncio.Future, float]] = field(default_factory=list)
-    timer: asyncio.TimerHandle | None = None
+    timer: asyncio.TimerHandle | None = None  # max_wait deadline for the oldest row
+    drain: asyncio.Handle | None = None  # flush already scheduled on the loop
 
 
 @dataclass
@@ -72,15 +73,19 @@ class Batcher:
             self._queues[key] = queue
         queue.items.append((features, fut, time.perf_counter()))
         if len(queue.items) >= self.max_batch_size:
-            self._flush(queue)
-        elif queue.timer is None:
+            # Full: run on the next loop step rather than inline, so every waiter in the
+            # batch is parked on its future before results land and wakes in FIFO order.
+            if queue.drain is None:
+                queue.drain = loop.call_soon(self._flush, queue)
+        elif queue.timer is None and queue.drain is None:
             queue.timer = loop.call_later(self.max_wait_s, self._flush, queue)
         return await fut
 
     def _flush(self, queue: _Queue) -> None:
-        if queue.timer is not None:
-            queue.timer.cancel()
-            queue.timer = None
+        for handle in (queue.timer, queue.drain):
+            if handle is not None:
+                handle.cancel()
+        queue.timer = queue.drain = None
         items = queue.items[: self.max_batch_size]
         del queue.items[: self.max_batch_size]
         if not items:
@@ -113,8 +118,8 @@ class Batcher:
     def _reschedule(self, queue: _Queue) -> None:
         if queue.items:
             # Keep draining in FIFO order without waiting for the timer again.
-            queue.timer = asyncio.get_running_loop().call_later(0, self._flush, queue)
-        elif not queue.items and self._queues.get(id(queue.model)) is queue:
+            queue.drain = asyncio.get_running_loop().call_soon(self._flush, queue)
+        elif self._queues.get(id(queue.model)) is queue:
             del self._queues[id(queue.model)]
 
     @property

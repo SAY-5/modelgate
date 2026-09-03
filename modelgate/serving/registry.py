@@ -157,7 +157,7 @@ class ModelRegistry:
         self.load(version)
         load_seconds = 0.0 if already else time.perf_counter() - started
         with self._swap_lock:
-            evicted = self._evict_locked()
+            evicted = self._evict_locked(protect={version})
         metrics.WARM_LOADS.labels(hit="true" if already else "false").inc()
         return {
             "version": version,
@@ -174,11 +174,11 @@ class ModelRegistry:
                 pins.add(model.version)
         return pins
 
-    def _evict_locked(self) -> list[str]:
+    def _evict_locked(self, protect: set[str] | None = None) -> list[str]:
         """Drop least recently touched unpinned versions until the pool fits."""
         evicted: list[str] = []
         while len(self._loaded) > self.pool_size:
-            pinned = self._pinned()
+            pinned = self._pinned() | (protect or set())
             candidates = [v for v in self._loaded if v not in pinned]
             if not candidates:
                 break
