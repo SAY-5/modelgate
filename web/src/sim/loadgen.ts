@@ -43,7 +43,7 @@ const LATENCY_WINDOW = 4000;
 
 export class LoadGen {
   rps: number;
-  running = false;
+  private _running = false;
   private carry = 0;
   private seq = 0;
   private pending: Pending[] = [];
@@ -94,6 +94,16 @@ export class LoadGen {
     return this.service.now - this.startedAt;
   }
 
+  get running(): boolean {
+    return this._running;
+  }
+
+  /** Starting a fresh run pins t+0 to now, the way the real tool starts its clock. */
+  set running(on: boolean) {
+    if (on && !this._running && this.sent === 0) this.startedAt = this.service.now;
+    this._running = on;
+  }
+
   private malformed(trip: Trip): unknown {
     const pick = this.chaosRng.int(5);
     switch (pick) {
@@ -130,19 +140,39 @@ export class LoadGen {
     const now = this.service.now;
     if (this.pending.length) {
       const still: Pending[] = [];
+      const batch: Outcome[] = [];
+      const t0 = performance.now();
       for (const p of this.pending) {
-        if (p.completeAt <= now) completed.push(this.completeOne(p, now));
+        if (p.completeAt <= now) batch.push(this.completeOne(p, now));
         else still.push(p);
       }
+      this.stampBatch(batch, performance.now() - t0);
       this.pending = still;
+      completed.push(...batch);
     }
     return completed;
+  }
+
+  /**
+   * performance.now is coarsened to 100 us in a normal browsing context, so a
+   * single request cannot be timed. Time the whole batch and share it out.
+   */
+  private stampBatch(batch: Outcome[], totalMs: number): void {
+    const ok = batch.filter((o) => o.status === 200);
+    if (!ok.length) return;
+    const each = totalMs / ok.length;
+    for (const o of ok) {
+      o.latencyMs = each;
+      this.pushLatency(each);
+    }
   }
 
   /** Complete every in-flight request immediately (used when stopping). */
   drain(): Outcome[] {
     const now = this.service.now;
+    const t0 = performance.now();
     const out = this.pending.map((p) => this.completeOne(p, now));
+    this.stampBatch(out, performance.now() - t0);
     this.pending = [];
     return out;
   }
@@ -168,10 +198,8 @@ export class LoadGen {
   }
 
   private completeOne(p: Pending, now: number): Outcome {
-    const t0 = performance.now();
     const outcome = this.service.finish(p.req);
-    const computeMs = performance.now() - t0;
-    return this.record(p.seq, p.req.sentAt, now, computeMs, outcome);
+    return this.record(p.seq, p.req.sentAt, now, 0, outcome);
   }
 
   private record(seq: number, sentAt: number, completedAt: number, computeMs: number, outcome: PredictOutcome): Outcome {
@@ -179,7 +207,6 @@ export class LoadGen {
     const o: Outcome = { seq, sentAt, completedAt, latencyMs: computeMs, status: outcome.status, version };
     if (outcome.status === 200) {
       this.ok += 1;
-      this.pushLatency(computeMs);
     } else if (outcome.status === 422) {
       this.rejected += 1;
     } else {
@@ -210,7 +237,7 @@ export class LoadGen {
   pushSparkline(outcomes: Outcome[]): void {
     const ok = outcomes.filter((o) => o.status === 200);
     if (!ok.length) return;
-    const mean = ok.reduce((a, o) => a + o.latencyMs, 0) / ok.length;
+    const mean = ok[0].latencyMs;
     this.sparkline.push(mean);
     if (this.sparkline.length > 160) this.sparkline.shift();
   }
