@@ -2,8 +2,9 @@
 
 ML model serving and monitoring for a PyTorch ETA model. A FastAPI service with strict
 input validation, shadow runs and weighted canaries for candidate versions with automatic
-rollback, Prometheus metrics on a provisioned Grafana dashboard, and load-tested version
-swaps that complete with 0 dropped requests.
+rollback, per-feature drift scores against the training manifest, Prometheus metrics on a
+provisioned Grafana dashboard, and load-tested version swaps that complete with 0 dropped
+requests.
 
 Python 3.12, PyTorch (CPU), FastAPI, prometheus_client, Grafana, uv.
 
@@ -20,6 +21,11 @@ Python 3.12, PyTorch (CPU), FastAPI, prometheus_client, Grafana, uv.
   p95 inference latency are tracked over a rolling window, and the canary is rolled back
   automatically when it exceeds the primary by a configured margin. A canary failure falls
   back to the primary answer for that request, so a broken candidate never drops a request.
+- Scores input drift per feature. The trainer writes mean, std, quantiles, decile edges,
+  and category frequencies for every input into `manifest.json`; serving keeps a rolling
+  window of accepted inputs and reports a population stability index per feature, the
+  unknown-category rate, and live versus training statistics on `GET /admin/drift` and as
+  `modelgate_feature_drift` gauges.
 - Swaps versions atomically. The candidate is loaded and warmed off the request path, then
   the primary reference is replaced in O(1) under a lock. In-flight requests finish on the
   model they started with. `make demo` proves this with a 200 rps load test that promotes
@@ -36,6 +42,9 @@ Python 3.12, PyTorch (CPU), FastAPI, prometheus_client, Grafana, uv.
   POST /predict  ------> |  pydantic strict schema -> 422 + rejection metric |
                          |        |                                         |
                          |        v                                         |
+                         |  DriftMonitor: rolling window vs manifest stats  |
+                         |        |                                         |
+                         |        v                                         |
                          |  CanaryRouter: weighted split, auto-rollback     |
                          |        |                                         |
                          |        v                                         |
@@ -46,7 +55,7 @@ Python 3.12, PyTorch (CPU), FastAPI, prometheus_client, Grafana, uv.
                          |    previous     (rollback target)    log+metrics |
                          |        ^                                         |
   admin (X-Admin-Token)  |        | load + warm in thread, swap under lock   |
-  POST /admin/promote -> |  /admin/shadow  /admin/canary  /admin/rollback   |
+  POST /admin/promote -> |  /admin/shadow /admin/canary /admin/drift ...    |
                          |                                                  |
   Prometheus  <--------- |  GET /metrics      GET /healthz   GET /readyz    |
                          +--------------------------------------------------+
@@ -138,6 +147,8 @@ checks that the weights and MAE match.
 | GET    | `/admin/shadow/report` | token | Divergence stats: count, mean/p50/p95/max abs delta, relative delta, share beyond threshold, bias. |
 | POST   | `/admin/canary`        | token | `{version, weight}` routes `weight` (0..1] of traffic to that version; `{version: null}` clears. |
 | GET    | `/admin/canary/report` | token | Canary status, weight, per-version samples, error rate, p50/p95 inference latency, thresholds, last rollback. |
+| GET    | `/admin/drift`         | token | Per-feature drift score, status (`insufficient`, `stable`, `moderate`, `drifted`), unknown-category rate, live and training statistics. |
+| POST   | `/admin/drift/reset`   | token | Clears the drift window. |
 | POST   | `/admin/promote`       | token | `{version}` loads, warms, and swaps the primary. Clears the canary if it was that version. |
 | POST   | `/admin/rollback`      | token | Swaps the primary back to the previous version. |
 
@@ -172,6 +183,9 @@ Validation rules on `/predict` (any failure is a 422 with `{"error", "rejections
 | `modelgate_version_swaps_total` | counter | `kind` (`promote`, `rollback`) | Primary swaps. |
 | `modelgate_dropped_requests_total` | counter | | Requests that failed for a reason other than invalid input. Stays 0. |
 | `modelgate_models_loaded` | gauge | | Versions resident in memory. |
+| `modelgate_feature_drift` | gauge | `feature` | PSI of the live input window against training; 0 until `MODELGATE_DRIFT_MIN_SAMPLES` is reached. |
+| `modelgate_feature_unknown_rate` | gauge | `feature` | Share of recent requests carrying a category not seen in training. |
+| `modelgate_drift_window_samples` | gauge | | Accepted requests in the drift window. |
 | `modelgate_canary_weight` | gauge | | Share of traffic routed to the canary; 0 when none is active. |
 | `modelgate_canary_info` | gauge | `version` | 1 for the version serving as the canary. |
 | `modelgate_canary_requests_total` | counter | `version`, `outcome` (`ok`, `fallback`) | Requests routed to the canary; `fallback` means the primary answered instead. |
@@ -203,22 +217,39 @@ drawn as annotations across every time series.
 | `MODELGATE_CANARY_ERROR_RATE_DELTA` | `0.02` | Roll back when the canary error rate exceeds the primary's by more than this. |
 | `MODELGATE_CANARY_LATENCY_RATIO` | `2.0` | Roll back when the canary p95 inference latency exceeds the primary's by this factor. |
 | `MODELGATE_CANARY_LATENCY_FLOOR_MS` | `1.0` | The p95 gap must also exceed this many milliseconds, so sub-millisecond noise does not trigger a rollback. |
+| `MODELGATE_DRIFT_WINDOW_SIZE` | `2000` | Accepted requests kept per feature for drift scoring. |
+| `MODELGATE_DRIFT_MIN_SAMPLES` | `100` | Samples before a feature gets a score and a status. |
+| `MODELGATE_DRIFT_WARN_THRESHOLD` | `0.1` | PSI at or above this is `moderate`. |
+| `MODELGATE_DRIFT_ALERT_THRESHOLD` | `0.25` | PSI at or above this is `drifted`. |
+| `MODELGATE_DRIFT_REFRESH_EVERY` | `100` | Observations between gauge refreshes; the report always recomputes. |
 
 ## Layout
 
 ```
-modelgate/model/      features.py, net.py, data.py, train.py
-modelgate/serving/    app.py, registry.py, schemas.py, shadow.py, canary.py, metrics.py, config.py
+modelgate/model/      features.py, net.py, data.py, stats.py, train.py
+modelgate/serving/    app.py, registry.py, schemas.py, shadow.py, canary.py, drift.py, metrics.py, config.py
 artifacts/            eta_v1.pt, eta_v2.pt, manifest.json (committed, reproducible)
 loadtest/run.py       open-loop load generator with mid-run canary and promote
 monitoring/           prometheus.yml, grafana provisioning and dashboard
-tests/                validation, registry, shadow, canary, zero-drop swap, metrics, training
+tests/                validation, registry, shadow, canary, drift, zero-drop swap, metrics, training
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the swap mechanism, shadow design, and the
 reasoning behind the validation and metrics choices.
 
 ## Changelog
+
+### 3.0.0
+
+- Feature drift monitoring: the trainer records mean, std, quantiles, decile edges, and
+  category frequencies per input in `manifest.json`; serving scores a rolling window of
+  accepted inputs with a population stability index per feature.
+- `GET /admin/drift` reports score, status, unknown-category rate (fed by `unknown_zone`
+  rejections), and live versus training statistics; `POST /admin/drift/reset` clears the
+  window.
+- `modelgate_feature_drift{feature}`, `modelgate_feature_unknown_rate{feature}`, and
+  `modelgate_drift_window_samples` gauges. Training-like traffic scores about 0.01 on
+  every feature; tripling trip distance scores above 2 on `distance_km` alone.
 
 ### 2.0.0
 

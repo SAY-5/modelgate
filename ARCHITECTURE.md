@@ -93,6 +93,37 @@ primary. This is what lets a broken canary trigger rollback without a single dro
 Promoting the canary version clears the canary, as with the shadow; a version cannot route
 to itself.
 
+## Feature drift
+
+Drift is scored per input feature against statistics the trainer writes into the manifest
+(`modelgate/model/stats.py`): for numeric inputs the mean, std, five quantiles, and the
+nine decile edges of the training column; for categorical inputs (hour, day of week, zone,
+rain) the frequency of each category. Because training is seeded, the reference is
+reproducible and `tests/test_drift.py` asserts that recomputing it from the dataset gives
+the manifest byte for byte.
+
+`DriftMonitor` in `modelgate/serving/drift.py` keeps one bounded deque per feature of the
+values in accepted `/predict` payloads. The score is the population stability index (PSI):
+live values are binned into the ten equal-mass bins defined by the training deciles (so the
+expected share is 0.1 per bin) or into the training categories, and
+`sum((obs - exp) * ln(obs / exp))` is taken with a small floor on both sides so an empty
+bin is finite. PSI is 0 for an identical distribution, about 0.1 for a mild shift, and above
+0.25 for one that should be looked at; those two thresholds map to the `moderate` and
+`drifted` statuses and are configurable. Every feature also reports live mean, std, and
+quantiles or frequencies next to the training values, so the direction of a shift is
+visible without a second query.
+
+Unknown categories are rejected by validation before a payload reaches the window, which
+is the right place for them (the model has no embedding for a new zone) but would make
+them invisible to drift. The validation handler therefore forwards `unknown_zone`
+rejections to `record_unknown`, and the report shows an unknown-category rate over the
+same window as the accepted values.
+
+Scores are recomputed into the `modelgate_feature_drift` gauges every `refresh_every`
+observations rather than on every request: the window is sorted for quantiles and PSI, and
+doing that at 200 rps for six features would be wasted work. `GET /admin/drift` always
+recomputes. No inference uses the drift path, so a bug there cannot change an answer.
+
 ## Input validation
 
 `PredictRequest` is a pydantic model with `strict=True` and `extra="forbid"`:
