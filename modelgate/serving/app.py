@@ -23,6 +23,7 @@ from modelgate.serving.canary import CanaryRouter, CanaryThresholds
 from modelgate.serving.config import Settings
 from modelgate.serving.drift import DriftMonitor
 from modelgate.serving.registry import ModelRegistry, NoPrimaryError, UnknownVersionError
+from modelgate.serving.reqlog import RequestLog
 from modelgate.serving.schemas import (
     CanaryRequest,
     PredictRequest,
@@ -58,6 +59,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     shadow_tracker = ShadowTracker(settings.shadow_threshold_minutes, settings.shadow_log_size)
     batcher = Batcher(settings.batch_max_size, settings.batch_max_wait_ms / 1000.0)
+    request_log = RequestLog(settings.request_log_path, settings.request_log_sample_rate)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -76,6 +78,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await asyncio.to_thread(registry.warm, version)
                 log.info("warm pool loaded: %s", version)
         yield
+        request_log.close()
 
     drift = DriftMonitor(
         registry.manifest.get("training_stats"),
@@ -97,6 +100,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.canary = canary
     app.state.drift = drift
     app.state.batcher = batcher
+    app.state.request_log = request_log
     app.state.settings = settings
 
     # ---- auth ------------------------------------------------------------
@@ -171,6 +175,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         metrics.REQUESTS.labels(version=served.version, outcome="ok").inc()
         metrics.PREDICTIONS_ETA.labels(version=served.version).observe(eta)
+        request_log.record(payload, served.version, round(eta, 2))
 
         shadow = registry.shadow
         if shadow is not None and shadow.version != served.version:
@@ -266,6 +271,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         report["primary"] = registry.primary.version if registry.primary else None
         report["shadow"] = registry.shadow.version if registry.shadow else None
         return report
+
+    @app.get("/admin/request-log", dependencies=[Depends(require_admin)])
+    async def admin_request_log():
+        request_log.flush()
+        return request_log.describe()
 
     @app.post("/admin/warm", dependencies=[Depends(require_admin)])
     async def admin_warm(body: WarmRequest):

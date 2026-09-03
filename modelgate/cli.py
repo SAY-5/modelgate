@@ -1,4 +1,4 @@
-"""Command line entry point: `modelgate serve` and `modelgate train`."""
+"""Command line entry point: `modelgate serve`, `modelgate train`, and `modelgate eval`."""
 
 from __future__ import annotations
 
@@ -19,7 +19,24 @@ def main(argv: list[str] | None = None) -> int:
     train.add_argument("--out", default="artifacts")
     train.add_argument("--seed", type=int, default=7)
 
+    ev = sub.add_parser("eval", help="replay a request log against model versions")
+    ev.add_argument("--log", required=True)
+    ev.add_argument("--versions", nargs="+", required=True)
+    ev.add_argument("--artifacts", default="artifacts")
+    ev.add_argument("--truth", choices=("auto", "reference", "none"), default="auto")
+    ev.add_argument("--threshold", type=float, default=2.0)
+    ev.add_argument("--json", default=None)
+
     args = parser.parse_args(argv)
+    if args.command == "eval":
+        from modelgate.eval import main as eval_main
+
+        eval_argv = ["--log", args.log, "--versions", *args.versions]
+        eval_argv += ["--artifacts", args.artifacts, "--truth", args.truth]
+        eval_argv += ["--threshold", str(args.threshold)]
+        if args.json:
+            eval_argv += ["--json", args.json]
+        return eval_main(eval_argv)
     if args.command == "serve":
         import uvicorn
 
