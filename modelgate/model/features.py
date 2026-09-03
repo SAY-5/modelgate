@@ -28,6 +28,9 @@ BASE_FEATURES: tuple[str, ...] = (
 FEATURE_DIM = len(BASE_FEATURES) + NUM_ZONES
 
 MAX_DISTANCE_KM = 500.0
+# Typical trips are a few km; scaling by 50 keeps the dominant feature in a
+# range the MLP learns from quickly while still covering the 500 km cap.
+DISTANCE_SCALE_KM = 50.0
 
 
 def feature_names() -> list[str]:
@@ -46,7 +49,7 @@ def encode(
     hour_angle = 2.0 * math.pi * hour_of_day / 24.0
     dow_angle = 2.0 * math.pi * day_of_week / 7.0
     row = [
-        distance_km / MAX_DISTANCE_KM,
+        distance_km / DISTANCE_SCALE_KM,
         math.sin(hour_angle),
         math.cos(hour_angle),
         math.sin(dow_angle),

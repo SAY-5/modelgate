@@ -26,7 +26,7 @@ from modelgate.model.data import (
     naive_baseline_mae,
 )
 from modelgate.model.features import FEATURE_DIM, ZONE_IDS, feature_names
-from modelgate.model.net import EtaNet
+from modelgate.model.net import EtaNet, save_model
 
 DEFAULT_SEED = 7
 DATASET_SIZE = 12_000
@@ -43,8 +43,8 @@ class VersionSpec:
 
 
 VERSIONS: tuple[VersionSpec, ...] = (
-    VersionSpec("v1", hidden=64, depth=2, epochs=12, lr=3e-3),
-    VersionSpec("v2", hidden=96, depth=3, epochs=30, lr=2e-3),
+    VersionSpec("v1", hidden=64, depth=2, epochs=10, lr=3e-3),
+    VersionSpec("v2", hidden=96, depth=3, epochs=25, lr=2e-3),
 )
 
 
@@ -80,10 +80,8 @@ def train_one(
     return model
 
 
-def export(model: EtaNet, path: Path) -> None:
-    example = torch.zeros(1, FEATURE_DIM)
-    scripted = torch.jit.trace(model, example)
-    scripted.save(str(path))
+def export(model: EtaNet, spec: VersionSpec, path: Path) -> None:
+    save_model(model, path, hidden=spec.hidden, depth=spec.depth)
 
 
 def train_all(out: Path, seed: int = DEFAULT_SEED, quiet: bool = False) -> dict:
@@ -120,7 +118,7 @@ def train_all(out: Path, seed: int = DEFAULT_SEED, quiet: bool = False) -> dict:
         with torch.no_grad():
             mae = mean_absolute_error(model(x_test), y_test)
         path = out / f"eta_{spec.version}.pt"
-        export(model, path)
+        export(model, spec, path)
         manifest["versions"][spec.version] = {
             "file": path.name,
             "arch": {"hidden": spec.hidden, "depth": spec.depth},

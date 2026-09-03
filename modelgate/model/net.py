@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
 from torch import nn
 
@@ -23,3 +25,16 @@ class EtaNet(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Softplus keeps predicted minutes positive without clipping gradients.
         return nn.functional.softplus(self.body(x)).squeeze(-1)
+
+
+def save_model(model: EtaNet, path: Path, hidden: int, depth: int) -> None:
+    torch.save({"hidden": hidden, "depth": depth, "state_dict": model.state_dict()}, path)
+
+
+def load_model(path: Path) -> EtaNet:
+    """Rebuild an EtaNet from a saved artifact. Only tensors are unpickled."""
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    model = EtaNet(hidden=int(payload["hidden"]), depth=int(payload["depth"]))
+    model.load_state_dict(payload["state_dict"])
+    model.eval()
+    return model
