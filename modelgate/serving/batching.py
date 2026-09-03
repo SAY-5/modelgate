@@ -7,6 +7,14 @@ in FIFO order, so the fairness bound is simple: a request waits at most
 `max_wait_s` for its batch to start, plus one batch execution for every
 `max_batch_size` requests that were queued ahead of it.
 
+The wait is adaptive. A row that arrives more than `max_wait_s` after the
+previous one for its model is sparse traffic: nothing else is likely to join
+it, so it runs on the next loop step instead of paying the wait. Rows that
+arrive within `max_wait_s` of each other are dense traffic and are held for
+up to `max_wait_s` so they can share a forward pass. Simultaneous arrivals
+(the same loop step) always batch. Sparse traffic therefore keeps single-row
+latency, and bursts get batched.
+
 Every forward pass is padded to a fixed row count (see `LoadedModel`), so a
 request gets bit-identical output whether it ran alone or in a full batch. A
 `max_batch_size` of 1 disables batching: each call runs immediately.
@@ -40,6 +48,7 @@ class _Queue:
     items: list[tuple[torch.Tensor, asyncio.Future, float]] = field(default_factory=list)
     timer: asyncio.TimerHandle | None = None  # max_wait deadline for the oldest row
     drain: asyncio.Handle | None = None  # flush already scheduled on the loop
+    last_arrival: float = 0.0
 
 
 @dataclass
@@ -71,12 +80,17 @@ class Batcher:
         if queue is None or queue.model is not model:
             queue = _Queue(model)
             self._queues[key] = queue
-        queue.items.append((features, fut, time.perf_counter()))
-        if len(queue.items) >= self.max_batch_size:
-            # Full: run on the next loop step rather than inline, so every waiter in the
-            # batch is parked on its future before results land and wakes in FIFO order.
-            if queue.drain is None:
-                queue.drain = loop.call_soon(self._flush, queue)
+        now = time.perf_counter()
+        sparse = now - queue.last_arrival > self.max_wait_s
+        queue.last_arrival = now
+        queue.items.append((features, fut, now))
+        if queue.drain is None and (sparse or len(queue.items) >= self.max_batch_size):
+            # Run on the next loop step rather than inline, so every waiter in the batch
+            # is parked on its future before results land and wakes in FIFO order.
+            if queue.timer is not None:
+                queue.timer.cancel()
+                queue.timer = None
+            queue.drain = loop.call_soon(self._flush, queue)
         elif queue.timer is None and queue.drain is None:
             queue.timer = loop.call_later(self.max_wait_s, self._flush, queue)
         return await fut
@@ -116,11 +130,11 @@ class Batcher:
         self._reschedule(queue)
 
     def _reschedule(self, queue: _Queue) -> None:
+        # Idle queues stay registered so `last_arrival` keeps the density signal; there
+        # is one per loaded model object, which the warm pool keeps bounded.
         if queue.items:
             # Keep draining in FIFO order without waiting for the timer again.
             queue.drain = asyncio.get_running_loop().call_soon(self._flush, queue)
-        elif self._queues.get(id(queue.model)) is queue:
-            del self._queues[id(queue.model)]
 
     @property
     def pending(self) -> int:

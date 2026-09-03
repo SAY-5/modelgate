@@ -1,8 +1,9 @@
 """Open-loop load generator that swaps model versions mid-run.
 
-Drives POST /predict at a fixed request rate, optionally enables a shadow run
-at 25% of the run and a weighted canary at 35%, promotes the candidate version
-at 50%, and accounts for every single request. A request is "dropped" if it got any non-2xx response
+Drives POST /predict at a fixed request rate, optionally pre-warms the
+candidate at 15% of the run, enables a shadow run at 25% and a weighted canary
+at 35%, promotes the candidate version at 50%, and accounts for every single
+request. A request is "dropped" if it got any non-2xx response
 or no response at all (connection error, timeout). The point of the exercise
 is that the dropped count is 0 across the swap.
 
@@ -47,6 +48,8 @@ class Outcome:
 class RunResult:
     outcomes: list[Outcome] = field(default_factory=list)
     started_wall: float = 0.0
+    warm_at: float | None = None
+    warm_record: dict | None = None
     shadow_at: float | None = None
     canary_at: float | None = None
     swap_requested_at: float | None = None
@@ -55,6 +58,7 @@ class RunResult:
     server_dropped_metric: float | None = None
     shadow_report: dict | None = None
     canary_report: dict | None = None
+    batch_stats: dict | None = None
 
 
 def random_trip(rng: random.Random) -> dict:
@@ -121,6 +125,14 @@ async def run_load(args: argparse.Namespace) -> RunResult:
                 result.outcomes.append(Outcome(seq, planned_at, None, None, None, repr(exc)))
 
         async def control() -> None:
+            if args.prewarm:
+                await asyncio.sleep(args.duration * 0.15)
+                result.warm_at = time.perf_counter() - start
+                r = await client.post(
+                    "/admin/warm", json={"version": args.promote_to}, headers=admin
+                )
+                r.raise_for_status()
+                result.warm_record = r.json()
             if args.shadow_first:
                 await asyncio.sleep(args.duration * 0.25)
                 result.shadow_at = time.perf_counter() - start
@@ -147,8 +159,11 @@ async def run_load(args: argparse.Namespace) -> RunResult:
             result.swap_record = r.json()
 
         controller = asyncio.create_task(control())
+        burst = max(1, args.burst)
         for seq in range(total):
-            planned = seq * interval
+            # With --burst N, N requests are released together every N intervals; the
+            # average rate is unchanged and concurrent arrivals exercise the batcher.
+            planned = (seq // burst) * burst * interval
             now = time.perf_counter() - start
             if planned > now:
                 await asyncio.sleep(planned - now)
@@ -165,9 +180,26 @@ async def run_load(args: argparse.Namespace) -> RunResult:
             if r.status_code == 200:
                 result.canary_report = r.json()
         metrics_text = (await client.get("/metrics")).text
+        sums: dict[str, float] = {}
         for line in metrics_text.splitlines():
             if line.startswith("modelgate_dropped_requests_total "):
                 result.server_dropped_metric = float(line.split()[-1])
+            for name in ("modelgate_batch_size", "modelgate_batch_queue_wait_seconds"):
+                for suffix in ("_sum", "_count"):
+                    if line.startswith(name + suffix):
+                        sums[name + suffix] = sums.get(name + suffix, 0.0) + float(line.split()[-1])
+        batches = sums.get("modelgate_batch_size_count", 0.0)
+        if batches:
+            result.batch_stats = {
+                "batches": int(batches),
+                "mean_batch_size": round(sums["modelgate_batch_size_sum"] / batches, 2),
+                "mean_queue_wait_ms": round(
+                    1000
+                    * sums["modelgate_batch_queue_wait_seconds_sum"]
+                    / max(sums.get("modelgate_batch_queue_wait_seconds_count", 1.0), 1.0),
+                    3,
+                ),
+            }
     return result
 
 
@@ -203,6 +235,9 @@ def summarize(result: RunResult, args: argparse.Namespace) -> dict:
             "max": round(max(latencies), 2) if latencies else 0.0,
             "mean": round(statistics.fmean(latencies), 2) if latencies else 0.0,
         },
+        "warm_at_s": round(result.warm_at, 3) if result.warm_at else None,
+        "warm_record": result.warm_record,
+        "batching": result.batch_stats,
         "shadow_enabled_at_s": round(result.shadow_at, 3) if result.shadow_at else None,
         "canary_enabled_at_s": round(result.canary_at, 3) if result.canary_at else None,
         "canary_weight": args.canary_weight,
@@ -247,6 +282,18 @@ def print_summary(s: dict) -> None:
     print(
         f"latency ms         p50 {lat['p50']}  p95 {lat['p95']}  p99 {lat['p99']}  max {lat['max']}"
     )
+    if s["batching"]:
+        b = s["batching"]
+        print(
+            f"batching           {b['batches']} batches, mean size {b['mean_batch_size']}, "
+            f"mean queue wait {b['mean_queue_wait_ms']} ms"
+        )
+    if s["warm_at_s"] is not None:
+        w = s["warm_record"] or {}
+        print(
+            f"warm pool          t+{s['warm_at_s']}s ({s['swap']['to']} loaded in "
+            f"{w.get('load_seconds')}s, resident {w.get('resident')})"
+        )
     if s["shadow_enabled_at_s"] is not None:
         print(f"shadow enabled     t+{s['shadow_enabled_at_s']}s ({s['swap']['to']} shadowing)")
     if s["canary_enabled_at_s"] is not None:
@@ -255,9 +302,13 @@ def print_summary(s: dict) -> None:
             f"({s['swap']['to']} at weight {s['canary_weight']})"
         )
     sw = s["swap"]
+    rec = sw["server_record"] or {}
+    warm_note = ""
+    if "prewarmed" in rec:
+        warm_note = f", prewarmed={rec['prewarmed']} load={rec.get('load_seconds')}s"
     print(
         f"swap {sw['from']} -> {sw['to']}     requested t+{sw['requested_at_s']}s, "
-        f"completed t+{sw['completed_at_s']}s ({sw['wall_clock']})"
+        f"completed t+{sw['completed_at_s']}s ({sw['wall_clock']}{warm_note})"
     )
     print(f"versions before    {s['versions_before_swap']}")
     print(f"versions after     {s['versions_after_swap']}")
@@ -312,6 +363,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--from-version", default="v1")
     p.add_argument("--promote-to", default="v2")
     p.add_argument("--shadow-first", action="store_true")
+    p.add_argument("--prewarm", action="store_true", help="warm the candidate before the swap")
+    p.add_argument("--burst", type=int, default=1, help="release requests in groups of N")
     p.add_argument(
         "--canary-weight",
         type=float,

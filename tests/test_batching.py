@@ -57,24 +57,33 @@ async def test_batcher_groups_concurrent_submits_and_preserves_results():
     assert batcher.pending == 0
 
 
-async def test_lone_request_waits_at_most_max_wait():
+async def test_sparse_requests_do_not_wait_and_dense_ones_wait_at_most_max_wait():
     reg = ModelRegistry(ARTIFACTS, pad_rows=8)
     model = reg.load("v1")
     max_wait = 0.005
     batcher = Batcher(max_batch_size=8, max_wait_s=max_wait)
-    x = _features(1, seed=33)
-    waits = []
-    for _ in range(20):
+    x = _features(4, seed=33)
+    # Sparse: each request arrives well after the previous one, so it runs at once.
+    for _ in range(10):
+        await asyncio.sleep(max_wait * 3)
         t0 = time.perf_counter()
-        result = await batcher.submit(model, x)
-        elapsed = time.perf_counter() - t0
-        waits.append(result.queue_wait_s)
+        result = await batcher.submit(model, x[:1])
         assert result.batch_size == 1
-        assert result.queue_wait_s <= elapsed
-        assert elapsed < max_wait + 0.05
-    # The timer, not the batch filling, released these; they waited about max_wait.
-    assert min(waits) >= max_wait * 0.5
-    assert max(waits) < max_wait + 0.05
+        assert result.queue_wait_s < max_wait
+        assert time.perf_counter() - t0 < max_wait
+    # Dense: a second request within max_wait of the first is held for up to max_wait
+    # so a third can join it; nothing waits longer than max_wait plus scheduling slack.
+    await asyncio.sleep(max_wait * 3)
+    first = asyncio.create_task(batcher.submit(model, x[:1]))
+    await asyncio.sleep(max_wait / 5)
+    second = asyncio.create_task(batcher.submit(model, x[1:2]))
+    await asyncio.sleep(max_wait / 5)
+    third = asyncio.create_task(batcher.submit(model, x[2:3]))
+    results = await asyncio.gather(first, second, third)
+    assert results[0].batch_size == 1
+    assert results[1].batch_size == 2 and results[2].batch_size == 2
+    assert max_wait * 0.5 <= results[1].queue_wait_s < max_wait + 0.05
+    assert results[2].queue_wait_s < max_wait + 0.05
 
 
 async def test_full_batch_does_not_wait_for_the_timer():
