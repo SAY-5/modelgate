@@ -63,6 +63,10 @@ class ModelRegistry:
             return {"versions": {}}
         return json.loads(path.read_text())
 
+    @property
+    def manifest(self) -> dict:
+        return self._manifest
+
     def available_versions(self) -> list[str]:
         return sorted(self._manifest.get("versions", {}))
 

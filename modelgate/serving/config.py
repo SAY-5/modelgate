@@ -20,6 +20,11 @@ class Settings:
     canary_error_rate_delta: float = 0.02
     canary_latency_ratio: float = 2.0
     canary_latency_floor_ms: float = 1.0
+    drift_window_size: int = 2000
+    drift_min_samples: int = 100
+    drift_warn_threshold: float = 0.1
+    drift_alert_threshold: float = 0.25
+    drift_refresh_every: int = 100
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -36,4 +41,9 @@ class Settings:
             canary_error_rate_delta=float(env.get("MODELGATE_CANARY_ERROR_RATE_DELTA", "0.02")),
             canary_latency_ratio=float(env.get("MODELGATE_CANARY_LATENCY_RATIO", "2.0")),
             canary_latency_floor_ms=float(env.get("MODELGATE_CANARY_LATENCY_FLOOR_MS", "1.0")),
+            drift_window_size=int(env.get("MODELGATE_DRIFT_WINDOW_SIZE", "2000")),
+            drift_min_samples=int(env.get("MODELGATE_DRIFT_MIN_SAMPLES", "100")),
+            drift_warn_threshold=float(env.get("MODELGATE_DRIFT_WARN_THRESHOLD", "0.1")),
+            drift_alert_threshold=float(env.get("MODELGATE_DRIFT_ALERT_THRESHOLD", "0.25")),
+            drift_refresh_every=int(env.get("MODELGATE_DRIFT_REFRESH_EVERY", "100")),
         )

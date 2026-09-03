@@ -20,6 +20,7 @@ from modelgate.model.features import encode
 from modelgate.serving import metrics
 from modelgate.serving.canary import CanaryRouter, CanaryThresholds
 from modelgate.serving.config import Settings
+from modelgate.serving.drift import DriftMonitor
 from modelgate.serving.registry import ModelRegistry, NoPrimaryError, UnknownVersionError
 from modelgate.serving.schemas import (
     CanaryRequest,
@@ -64,6 +65,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             log.info("shadow model loaded: %s", settings.shadow_version)
         yield
 
+    drift = DriftMonitor(
+        registry.manifest.get("training_stats"),
+        window_size=settings.drift_window_size,
+        min_samples=settings.drift_min_samples,
+        warn_threshold=settings.drift_warn_threshold,
+        alert_threshold=settings.drift_alert_threshold,
+        refresh_every=settings.drift_refresh_every,
+    )
+
     app = FastAPI(
         title="ModelGate",
         version=__version__,
@@ -73,6 +83,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.registry = registry
     app.state.shadow_tracker = shadow_tracker
     app.state.canary = canary
+    app.state.drift = drift
     app.state.settings = settings
 
     # ---- auth ------------------------------------------------------------
@@ -97,6 +108,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if request.url.path == "/predict":
             for reason in reasons:
                 metrics.INPUT_REJECTIONS.labels(reason=reason).inc()
+            for d in details:
+                if d["reason"] == "unknown_zone":
+                    drift.record_unknown(d["field"])
             primary = registry.primary
             metrics.REQUESTS.labels(
                 version=primary.version if primary else "none", outcome="rejected"
@@ -130,7 +144,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             metrics.REQUESTS.labels(version="none", outcome="error").inc()
             raise HTTPException(503, "no primary model loaded") from None
 
-        features = torch.tensor([encode(**body.model_dump())], dtype=torch.float32)
+        payload = body.model_dump()
+        features = torch.tensor([encode(**payload)], dtype=torch.float32)
+        drift.observe(payload)
         served = primary
         candidate = canary.pick(primary)
         if candidate is not None:
@@ -254,6 +270,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/admin/canary/report", dependencies=[Depends(require_admin)])
     async def admin_canary_report():
         return canary.report(registry.primary.version if registry.primary else None)
+
+    @app.get("/admin/drift", dependencies=[Depends(require_admin)])
+    async def admin_drift():
+        return drift.report()
+
+    @app.post("/admin/drift/reset", dependencies=[Depends(require_admin)])
+    async def admin_drift_reset():
+        drift.reset()
+        return {"reset": True}
 
     @app.post("/admin/promote", dependencies=[Depends(require_admin)])
     async def admin_promote(body: PromoteRequest):
