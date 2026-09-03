@@ -27,6 +27,7 @@ from modelgate.model.data import (
 )
 from modelgate.model.features import FEATURE_DIM, ZONE_IDS, feature_names
 from modelgate.model.net import EtaNet, save_model
+from modelgate.model.stats import compute_training_stats
 
 DEFAULT_SEED = 7
 DATASET_SIZE = 12_000
@@ -84,7 +85,7 @@ def export(model: EtaNet, spec: VersionSpec, path: Path) -> None:
 
 def train_all(out: Path, seed: int = DEFAULT_SEED, quiet: bool = False) -> dict:
     out.mkdir(parents=True, exist_ok=True)
-    x, y, _ = make_dataset(DATASET_SIZE, seed)
+    x, y, rows = make_dataset(DATASET_SIZE, seed)
     x_train, y_train, x_test, y_test = split(x, y, seed)
     baselines = {
         "mean_predictor_mae": round(naive_baseline_mae(y_train, y_test), 4),
@@ -108,6 +109,7 @@ def train_all(out: Path, seed: int = DEFAULT_SEED, quiet: bool = False) -> dict:
             },
         },
         "baselines": baselines,
+        "training_stats": compute_training_stats(rows),
         "versions": {},
     }
     for spec in VERSIONS:
