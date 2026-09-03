@@ -1,8 +1,9 @@
 # ModelGate
 
 ML model serving and monitoring for a PyTorch ETA model. A FastAPI service with strict
-input validation, shadow runs of candidate versions, Prometheus metrics on a provisioned
-Grafana dashboard, and load-tested version swaps that complete with 0 dropped requests.
+input validation, shadow runs and weighted canaries for candidate versions with automatic
+rollback, Prometheus metrics on a provisioned Grafana dashboard, and load-tested version
+swaps that complete with 0 dropped requests.
 
 Python 3.12, PyTorch (CPU), FastAPI, prometheus_client, Grafana, uv.
 
@@ -15,6 +16,10 @@ Python 3.12, PyTorch (CPU), FastAPI, prometheus_client, Grafana, uv.
 - Keeps a model registry with a primary and an optional shadow version. Shadow inference runs
   on every request, divergence against the primary is recorded, and the client always gets
   the primary answer.
+- Routes a weighted share of live traffic to a canary version. Per-version error rate and
+  p95 inference latency are tracked over a rolling window, and the canary is rolled back
+  automatically when it exceeds the primary by a configured margin. A canary failure falls
+  back to the primary answer for that request, so a broken candidate never drops a request.
 - Swaps versions atomically. The candidate is loaded and warmed off the request path, then
   the primary reference is replaced in O(1) under a lock. In-flight requests finish on the
   model they started with. `make demo` proves this with a 200 rps load test that promotes
@@ -31,13 +36,17 @@ Python 3.12, PyTorch (CPU), FastAPI, prometheus_client, Grafana, uv.
   POST /predict  ------> |  pydantic strict schema -> 422 + rejection metric |
                          |        |                                         |
                          |        v                                         |
+                         |  CanaryRouter: weighted split, auto-rollback     |
+                         |        |                                         |
+                         |        v                                         |
                          |  ModelRegistry                                   |
                          |    primary ---> LoadedModel(v1)  --> response    |
+                         |    canary  ---> LoadedModel(v2)  --> response    |
                          |    shadow  ---> LoadedModel(v2)  --> divergence  |
                          |    previous     (rollback target)    log+metrics |
                          |        ^                                         |
   admin (X-Admin-Token)  |        | load + warm in thread, swap under lock   |
-  POST /admin/promote -> |  /admin/shadow  /admin/rollback  /admin/versions |
+  POST /admin/promote -> |  /admin/shadow  /admin/canary  /admin/rollback   |
                          |                                                  |
   Prometheus  <--------- |  GET /metrics      GET /healthz   GET /readyz    |
                          +--------------------------------------------------+
@@ -127,7 +136,9 @@ checks that the weights and MAE match.
 | GET    | `/admin/versions`      | token | Available versions, roles, load state, swap history. |
 | POST   | `/admin/shadow`        | token | `{version}` starts shadowing that version; `{version: null}` stops. |
 | GET    | `/admin/shadow/report` | token | Divergence stats: count, mean/p50/p95/max abs delta, relative delta, share beyond threshold, bias. |
-| POST   | `/admin/promote`       | token | `{version}` loads, warms, and swaps the primary. |
+| POST   | `/admin/canary`        | token | `{version, weight}` routes `weight` (0..1] of traffic to that version; `{version: null}` clears. |
+| GET    | `/admin/canary/report` | token | Canary status, weight, per-version samples, error rate, p50/p95 inference latency, thresholds, last rollback. |
+| POST   | `/admin/promote`       | token | `{version}` loads, warms, and swaps the primary. Clears the canary if it was that version. |
 | POST   | `/admin/rollback`      | token | Swaps the primary back to the previous version. |
 
 Admin endpoints require the `X-Admin-Token` header matching `MODELGATE_ADMIN_TOKEN`.
@@ -161,6 +172,10 @@ Validation rules on `/predict` (any failure is a 422 with `{"error", "rejections
 | `modelgate_version_swaps_total` | counter | `kind` (`promote`, `rollback`) | Primary swaps. |
 | `modelgate_dropped_requests_total` | counter | | Requests that failed for a reason other than invalid input. Stays 0. |
 | `modelgate_models_loaded` | gauge | | Versions resident in memory. |
+| `modelgate_canary_weight` | gauge | | Share of traffic routed to the canary; 0 when none is active. |
+| `modelgate_canary_info` | gauge | `version` | 1 for the version serving as the canary. |
+| `modelgate_canary_requests_total` | counter | `version`, `outcome` (`ok`, `fallback`) | Requests routed to the canary; `fallback` means the primary answered instead. |
+| `modelgate_canary_rollbacks_total` | counter | `reason` (`error_rate`, `latency`) | Automatic canary rollbacks. |
 
 ## Grafana dashboard
 
@@ -183,22 +198,39 @@ drawn as annotations across every time series.
 | `MODELGATE_SHADOW_VERSION` | unset | Shadow version loaded at startup. |
 | `MODELGATE_SHADOW_THRESHOLD_MIN` | `2.0` | Divergence threshold for `share_beyond_threshold`. |
 | `MODELGATE_SHADOW_LOG_SIZE` | `5000` | Rolling window of shadow records kept for the report. |
+| `MODELGATE_CANARY_WINDOW_SECONDS` | `60` | Rolling window for per-version canary statistics. |
+| `MODELGATE_CANARY_MIN_SAMPLES` | `50` | Samples required from both versions before a rollback verdict. |
+| `MODELGATE_CANARY_ERROR_RATE_DELTA` | `0.02` | Roll back when the canary error rate exceeds the primary's by more than this. |
+| `MODELGATE_CANARY_LATENCY_RATIO` | `2.0` | Roll back when the canary p95 inference latency exceeds the primary's by this factor. |
+| `MODELGATE_CANARY_LATENCY_FLOOR_MS` | `1.0` | The p95 gap must also exceed this many milliseconds, so sub-millisecond noise does not trigger a rollback. |
 
 ## Layout
 
 ```
 modelgate/model/      features.py, net.py, data.py, train.py
-modelgate/serving/    app.py, registry.py, schemas.py, shadow.py, metrics.py, config.py
+modelgate/serving/    app.py, registry.py, schemas.py, shadow.py, canary.py, metrics.py, config.py
 artifacts/            eta_v1.pt, eta_v2.pt, manifest.json (committed, reproducible)
-loadtest/run.py       open-loop load generator with mid-run promote
+loadtest/run.py       open-loop load generator with mid-run canary and promote
 monitoring/           prometheus.yml, grafana provisioning and dashboard
-tests/                validation, registry, shadow, zero-drop swap, metrics, training
+tests/                validation, registry, shadow, canary, zero-drop swap, metrics, training
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the swap mechanism, shadow design, and the
 reasoning behind the validation and metrics choices.
 
 ## Changelog
+
+### 2.0.0
+
+- Canary routing: `POST /admin/canary {version, weight}` sends a deterministic weighted
+  share of `/predict` traffic to a candidate version, served under its own version label
+  in every metric.
+- Automatic rollback: per-version error rate and p95 inference latency over a rolling
+  window; the canary is cleared as soon as either exceeds the primary by the configured
+  margin, and `GET /admin/canary/report` records why.
+- A failing canary falls back to the primary answer for that request and counts against the
+  candidate, so rollback happens with 0 dropped requests.
+- `loadtest.run --canary-weight` enables a canary before the mid-run promote.
 
 ### 1.0.0
 

@@ -57,6 +57,42 @@ place to move to a queue.
 
 Promoting the shadow version clears the shadow slot, since a version cannot be both.
 
+## Canary routing
+
+A canary is a candidate that answers a share of live traffic, unlike a shadow which only
+observes. `CanaryRouter` in `modelgate/serving/canary.py` owns three things.
+
+**Deterministic split.** Routing uses a fractional accumulator under a lock: each request
+adds the weight, and when the accumulator reaches 1 it is decremented and the request goes
+to the candidate. A 5% weight therefore sends exactly every 20th request to the candidate
+instead of a random 5% on average, which makes the split testable to the request and keeps
+the candidate's sample count predictable at low traffic. The candidate reference is read
+once per request, the same way the primary is, so a rollback mid-request does not change
+which model answers.
+
+**Rolling per-version windows.** Every served request records `(at, latency, ok)` for the
+version that answered, where latency is the inference call alone rather than the full
+request, so both versions are measured on the same request path. After each candidate
+sample the router prunes both windows to `window_seconds` and, once both hold at least
+`min_samples`, compares error rate and p95. The error rule is additive (`candidate >
+primary + delta`); the latency rule is a ratio with an absolute floor, because the ETA MLP
+evaluates in a few hundred microseconds and a pure ratio would fire on scheduler noise.
+
+**Rollback in the same call.** When a rule fires, the router records the verdict, bumps
+`modelgate_canary_rollbacks_total{reason}`, sets the weight to zero, and clears the
+candidate, all under the same lock that `pick()` takes. The very next request routes to the
+primary. No background task is involved and there is no window in which a rolled-back
+canary can still be chosen.
+
+A candidate failure is caught in `_serve_canary`: the request is answered by the primary,
+the failure is counted as `modelgate_canary_requests_total{outcome="fallback"}` and as an
+error sample for the candidate, and the client sees a 200 with `model_version` set to the
+primary. This is what lets a broken canary trigger rollback without a single drop, which
+`tests/test_canary.py` asserts with an always-raising candidate.
+
+Promoting the canary version clears the canary, as with the shadow; a version cannot route
+to itself.
+
 ## Input validation
 
 `PredictRequest` is a pydantic model with `strict=True` and `extra="forbid"`:
