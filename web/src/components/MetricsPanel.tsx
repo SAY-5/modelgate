@@ -27,7 +27,7 @@ function histRows(h: Histogram, unit: (v: number) => string, extraQ = true): Row
     const rows: Row[] = [{ series: `${base} count`, value: String(c.count), tone: toneFor(c.labels) }];
     if (extraQ && c.count) {
       rows.push({
-        series: `histogram_quantile(0.5 / 0.95 / 0.99)`,
+        series: `histogram_quantile(0.5 / 0.95 / 0.99), bucket estimate`,
         value: `${unit(h.quantile(0.5, c))} / ${unit(h.quantile(0.95, c))} / ${unit(h.quantile(0.99, c))}`,
         tone: "dim",
       });
