@@ -2,9 +2,10 @@
 
 ML model serving and monitoring for a PyTorch ETA model. A FastAPI service with strict
 input validation, shadow runs and weighted canaries for candidate versions with automatic
-rollback, per-feature drift scores against the training manifest, Prometheus metrics on a
-provisioned Grafana dashboard, and load-tested version swaps that complete with 0 dropped
-requests.
+rollback, per-feature drift scores against the training manifest, micro-batched inference
+with a warm model pool, a sampled request log with an offline replay harness, Prometheus
+metrics on a provisioned Grafana dashboard, and load-tested version swaps that complete
+with 0 dropped requests.
 
 Python 3.12, PyTorch (CPU), FastAPI, prometheus_client, Grafana, uv.
 
@@ -33,6 +34,10 @@ Python 3.12, PyTorch (CPU), FastAPI, prometheus_client, Grafana, uv.
 - Keeps a warm pool of resident versions. `POST /admin/warm` loads and warms a candidate
   into a spare slot so the later promote swaps in 0 s without touching disk; the pool
   evicts the least recently used version that holds no role when it is over capacity.
+- Captures a sampled, PII-free request log (the six numeric inputs, the serving version,
+  and the answer) behind a flag, and replays it offline: `modelgate eval` runs the log
+  against any two versions and reports MAE, a calibration table, and their divergence,
+  deterministically and bit-identical to what the service answered.
 - Swaps versions atomically. The candidate is loaded and warmed off the request path, then
   the primary reference is replaced in O(1) under a lock. In-flight requests finish on the
   model they started with. `make demo` proves this with a 200 rps load test that promotes
@@ -75,13 +80,14 @@ Python 3.12, PyTorch (CPU), FastAPI, prometheus_client, Grafana, uv.
   Grafana (dashboard auto-provisioned from monitoring/grafana)
 
   artifacts/eta_v1.pt, eta_v2.pt, manifest.json   <--  modelgate.model.train (seeded)
+  requests.jsonl (sampled, numeric inputs only)   -->  modelgate eval --versions v1 v2
 ```
 
 ## Quick start
 
 ```bash
 uv sync --extra dev          # CPU torch from the PyTorch wheel index
-make test                    # 55 tests including the zero-drop swap tests
+make test                    # 104 tests including the zero-drop swap tests
 make demo                    # start the server, 200 rps for 20 s, promote v2 at t+10 s
 ```
 
@@ -115,6 +121,32 @@ happened and finished on the reference it had captured. Nothing errored, nothing
 
 The load generator is open-loop (it sends on schedule regardless of responses), so a slow
 or failing server shows up as dropped requests rather than as a lower request rate.
+
+### Replaying a request log
+
+```bash
+MODELGATE_REQUEST_LOG=requests.jsonl MODELGATE_REQUEST_LOG_SAMPLE_RATE=0.1 make serve
+# ... serve traffic ...
+uv run modelgate eval --log requests.jsonl --versions v1 v2 --json report.json
+```
+
+Records carry only the validated numeric inputs, the version that answered, and the
+answer. The harness validates and encodes them with the same code the API uses and runs
+each version's padded forward pass, so the replay reproduces the logged answers bit for
+bit (`logged vs replayed: mismatches 0`) and two runs give the same report. Truth comes
+from an `actual_eta_minutes` field when a record has one (`--truth auto`), from the
+synthetic reference formula (`--truth reference`), or is skipped (`--truth none`). On the
+committed 300-record fixture:
+
+```
+v1     n=300  MAE 2.9394 min  p95|err| 7.3339  bias 0.0546  within 2 min 0.4367  ECE 2.1494
+v2     n=300  MAE 2.0095 min  p95|err| 4.2841  bias 0.4286  within 2 min 0.6433  ECE 0.5655
+logged vs replayed: checked 300, mismatches 0, max gap 0.0 min
+divergence v1 -> v2: n=300 mean|d| 2.6887 p95|d| 9.0694 max 33.8347 beyond 2.0 min 0.42
+```
+
+The calibration table under each version lists mean predicted against mean actual per
+predicted-ETA bucket; ECE is the sample-weighted mean absolute gap.
 
 ### Running the full stack
 
@@ -156,6 +188,7 @@ checks that the weights and MAE match.
 | GET    | `/admin/versions`      | token | Available versions, roles, load state, pool residency, swap history with `prewarmed` and `load_seconds`. |
 | POST   | `/admin/shadow`        | token | `{version}` starts shadowing that version; `{version: null}` stops. |
 | GET    | `/admin/shadow/report` | token | Divergence stats: count, mean/p50/p95/max abs delta, relative delta, share beyond threshold, bias. |
+| GET    | `/admin/request-log`   | token | Whether capture is on, the path, sample rate, and records written. |
 | POST   | `/admin/warm`          | token | `{version}` loads and warms a version into the pool; reports `load_seconds` and what was evicted. |
 | POST   | `/admin/canary`        | token | `{version, weight}` routes `weight` (0..1] of traffic to that version; `{version: null}` clears. |
 | GET    | `/admin/canary/report` | token | Canary status, weight, per-version samples, error rate, p50/p95 inference latency, thresholds, last rollback. |
@@ -202,6 +235,7 @@ Validation rules on `/predict` (any failure is a 422 with `{"error", "rejections
 | `modelgate_warm_loads_total` | counter | `hit` | Explicit warm requests, by whether the version was already resident. |
 | `modelgate_model_evictions_total` | counter | | Versions evicted from the pool. |
 | `modelgate_model_pool_slots` | gauge | | Pool capacity. |
+| `modelgate_request_log_records_total` | counter | | Accepted requests written to the sampled request log. |
 | `modelgate_feature_drift` | gauge | `feature` | PSI of the live input window against training; 0 until `MODELGATE_DRIFT_MIN_SAMPLES` is reached. |
 | `modelgate_feature_unknown_rate` | gauge | `feature` | Share of recent requests carrying a category not seen in training. |
 | `modelgate_drift_window_samples` | gauge | | Accepted requests in the drift window. |
@@ -245,24 +279,53 @@ drawn as annotations across every time series.
 | `MODELGATE_BATCH_MAX_WAIT_MS` | `2.0` | Longest a dense-traffic request is held for others to join its batch. |
 | `MODELGATE_MODEL_POOL_SIZE` | `3` | Versions kept resident; role holders are never evicted. |
 | `MODELGATE_WARM_VERSIONS` | unset | Comma-separated versions to warm at startup. |
+| `MODELGATE_REQUEST_LOG` | unset | JSON-lines path; setting it enables capture. |
+| `MODELGATE_REQUEST_LOG_SAMPLE_RATE` | `0.1` | Share of accepted requests written, as an exact deterministic split. |
 
 ## Layout
 
 ```
+modelgate/eval.py     replay harness behind `modelgate eval`
 modelgate/model/      features.py, net.py, data.py, stats.py, train.py
 modelgate/serving/    app.py, registry.py, batching.py, schemas.py, shadow.py, canary.py, drift.py,
-                      metrics.py, config.py
+                      reqlog.py, metrics.py, config.py
 artifacts/            eta_v1.pt, eta_v2.pt, manifest.json (committed, reproducible)
 loadtest/run.py       open-loop load generator with mid-run warm, canary, and promote
 monitoring/           prometheus.yml, grafana provisioning and dashboard
-tests/                validation, registry, shadow, canary, drift, batching, pool, zero-drop swap,
-                      metrics, training
+tests/                validation, registry, shadow, canary, drift, batching, pool, eval and
+                      request log, zero-drop swap, metrics, training; fixtures/replay_log.jsonl
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the swap mechanism, shadow design, and the
 reasoning behind the validation and metrics choices.
 
+## Releases
+
+| version | adds |
+|---------|------|
+| 1.0.0 | Serving with strict input checks, shadow runs, atomic zero-drop version swaps, Prometheus metrics, Grafana dashboard, load test. |
+| 2.0.0 | Canary routing: deterministic weighted split, per-version windows, automatic rollback on error rate or p95 latency, primary fallback so a broken canary drops nothing. |
+| 3.0.0 | Feature drift: training statistics in the manifest, PSI per feature over a rolling window, unknown-category rate, `GET /admin/drift` and gauges. |
+| 4.0.0 | Micro-batching with padded forward passes for bit-identical results, adaptive wait, FIFO fairness; warm model pool with `POST /admin/warm` and LRU eviction of role-free versions. |
+| 5.0.0 | Sampled PII-free request log and `modelgate eval`: replay against two versions with MAE, calibration, divergence, and a logged-versus-replayed consistency check. |
+
+Every release passed `ruff check`, `ruff format --check`, the full test suite, and the load
+test with a mid-run swap at 0 dropped requests before it was tagged.
+
 ## Changelog
+
+### 5.0.0
+
+- `MODELGATE_REQUEST_LOG` turns on a sampled JSON-lines log of accepted requests: the six
+  validated numeric inputs, the serving version, and the answer. No request id, header,
+  or address is written. Sampling is an exact deterministic split.
+- `modelgate eval --log FILE --versions A B` replays the log through the same validation,
+  encoding, and padded forward pass the service uses and reports MAE, p95 error, bias,
+  share within 2 minutes, and a calibration table with expected calibration error per
+  version, the divergence between the two versions, and how many logged answers the
+  replay reproduced. Two runs give the same report.
+- `GET /admin/request-log` reports capture status; `modelgate_request_log_records_total`
+  counts records. A 300-record fixture with the seeded actuals is committed for the tests.
 
 ### 4.0.0
 

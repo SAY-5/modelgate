@@ -191,6 +191,38 @@ and serving. Hour and day of week are encoded as sin/cos pairs so that 23:00 and
 neighbours, distance is scaled, and the zone is one-hot. `manifest.json` records the
 feature names and dimension so a mismatch between artifact and code is visible.
 
+## Request log and replay
+
+The request log exists so a candidate can be judged on real inputs offline, without
+running it as a shadow or canary first. `RequestLog` in `modelgate/serving/reqlog.py`
+writes one JSON line per sampled accepted request with exactly four keys: `at`, `input`
+(the six validated numeric fields), `version`, and `eta_minutes`. Nothing from the HTTP
+layer is written, including the client-supplied request id, so the file has no route for
+PII to enter it and can be shared. Sampling uses the same fractional accumulator as the
+canary router: a rate of 0.5 writes every second accepted request, which the tests check
+by position. Writes take a lock and go to a buffered file flushed every hundred records,
+on `GET /admin/request-log`, and at shutdown.
+
+`modelgate eval` (`modelgate/eval.py`) reads the log, validates each record with
+`PredictRequest` so that a malformed or out-of-range input is skipped and counted rather
+than silently encoded, builds the feature matrix with the shared `encode`, and runs each
+version's `predict_batch`. Because that path pads every forward pass to a fixed row count,
+the replay produces the same bits the service produced at serving time. The report
+exploits that: for every record whose `version` is one of the replayed versions it compares
+the replayed answer, rounded as the API rounds, with the logged one. A non-zero mismatch
+count means the artifact, the feature code, or the padding changed since the log was
+written, which is exactly the kind of drift a replay should surface before a promote.
+
+Accuracy uses whatever truth the log has. Production logs will not carry actuals at
+serving time, so `actual_eta_minutes` is an optional field to be joined in later; the
+committed fixture has it from the seeded dataset, and `--truth reference` evaluates
+against the synthetic formula for a noise-free view. Calibration buckets predictions by
+predicted ETA and reports mean predicted against mean actual per bucket, with the expected
+calibration error as the sample-weighted absolute gap; that is where the v1 fixture shows
+its pattern of over-predicting short trips and under-predicting long ones while v2 sits
+within a minute across the range. Divergence between the two versions reuses the shadow
+report's statistics so the offline number can be compared directly with the online one.
+
 ## Metrics design
 
 Metrics are module-level singletons in `modelgate/serving/metrics.py` and use the default
