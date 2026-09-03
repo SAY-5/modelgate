@@ -60,6 +60,12 @@ class PromoteRequest(BaseModel):
     version: str
 
 
+class CanaryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: str | None = None
+    weight: float = Field(default=0.05, gt=0.0, le=1.0, allow_inf_nan=False)
+
+
 def rejection_reason(error_type: str) -> str:
     """Map a pydantic error type to a low-cardinality rejection reason label."""
     if error_type == "extra_forbidden":
