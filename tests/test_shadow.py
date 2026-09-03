@@ -32,7 +32,8 @@ def test_tracker_window_is_bounded_but_count_is_not():
     t.record_error()
     assert t.report()["errors"] == 1
     t.reset()
-    assert t.report() == {**t.report(), "count": 0, "window": 0, "errors": 0}
+    rep = t.report()
+    assert (rep["count"], rep["window"], rep["errors"]) == (0, 0, 0)
 
 
 def test_empty_report_is_well_formed():

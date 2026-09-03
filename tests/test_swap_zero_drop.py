@@ -34,6 +34,9 @@ async def test_async_load_with_mid_run_promote():
                 nonlocal done
                 payload = {**GOOD_INPUT, "distance_km": 1 + (i % 40) * 0.5}
                 async with sem:
+                    # The in-process ASGI path never blocks on I/O, so yield to the
+                    # loop explicitly to interleave workers the way a socket would.
+                    await asyncio.sleep(0)
                     r = await client.post("/predict", json=payload)
                 version = r.json().get("model_version") if r.status_code == 200 else None
                 outcomes.append((r.status_code, version))

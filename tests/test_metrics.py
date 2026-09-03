@@ -28,11 +28,13 @@ def test_metrics_endpoint_exposes_expected_series(client):
         assert f"\n{name}" in text or text.startswith(name), name
 
     lines = text.splitlines()
-    assert any(l.startswith('modelgate_requests_total{outcome="ok",version="v1"}') for l in lines)
     assert any(
-        l.startswith('modelgate_input_rejections_total{reason="out_of_range"}') for l in lines
+        line.startswith('modelgate_requests_total{outcome="ok",version="v1"}') for line in lines
+    )
+    assert any(
+        line.startswith('modelgate_input_rejections_total{reason="out_of_range"}') for line in lines
     )
     assert 'modelgate_model_version_info{role="primary",version="v2"} 1.0' in lines
     assert 'modelgate_model_version_info{role="primary",version="v1"} 0.0' in lines
     assert "modelgate_dropped_requests_total 0.0" in lines
-    assert not any(l.startswith("modelgate_requests_created") for l in lines)
+    assert not any(line.startswith("modelgate_requests_created") for line in lines)

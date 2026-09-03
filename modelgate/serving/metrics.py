@@ -92,8 +92,8 @@ def counter_value(counter: Counter, **labels: str) -> float:
 def histogram_count(hist: Histogram, **labels: str) -> float:
     """Number of observations recorded by a histogram child (test helper)."""
     child = hist.labels(**labels) if labels else hist
-    # The last bucket is +Inf and holds the cumulative observation count.
-    return child._buckets[-1].get()
+    # Buckets are stored non-cumulatively; their sum is the observation count.
+    return sum(b.get() for b in child._buckets)
 
 
 def gauge_value(gauge: Gauge, **labels: str) -> float:
