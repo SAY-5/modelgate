@@ -29,6 +29,9 @@ LATENCY_BUCKETS = (
 )
 ETA_BUCKETS = (1, 2, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300)
 DIVERGENCE_BUCKETS = (0.1, 0.25, 0.5, 1, 2, 3, 5, 10, 20, 60)
+BATCH_SIZE_BUCKETS = (1, 2, 4, 8, 16, 32, 64, 128)
+QUEUE_WAIT_BUCKETS = (0.0001, 0.00025, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1)
+LOAD_BUCKETS = (0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0)
 
 REQUESTS = Counter(
     "modelgate_requests_total",
@@ -80,6 +83,42 @@ DROPPED_REQUESTS = Counter(
 MODEL_LOADED = Gauge(
     "modelgate_models_loaded",
     "Number of model versions resident in memory.",
+)
+BATCH_SIZE = Histogram(
+    "modelgate_batch_size",
+    "Rows per executed inference batch.",
+    ["version"],
+    buckets=BATCH_SIZE_BUCKETS,
+)
+BATCH_QUEUE_WAIT = Histogram(
+    "modelgate_batch_queue_wait_seconds",
+    "Time a request spent queued before its batch started.",
+    ["version"],
+    buckets=QUEUE_WAIT_BUCKETS,
+)
+BATCHES = Counter(
+    "modelgate_batches_total",
+    "Inference batches executed.",
+    ["version"],
+)
+SWAP_LOAD_SECONDS = Histogram(
+    "modelgate_swap_load_seconds",
+    "Time spent loading and warming before a promote could swap; near 0 when pre-warmed.",
+    ["prewarmed"],
+    buckets=LOAD_BUCKETS,
+)
+WARM_LOADS = Counter(
+    "modelgate_warm_loads_total",
+    "Explicit warm requests, by whether the version was already resident.",
+    ["hit"],
+)
+MODEL_EVICTIONS = Counter(
+    "modelgate_model_evictions_total",
+    "Versions evicted from the warm pool.",
+)
+MODEL_POOL_SLOTS = Gauge(
+    "modelgate_model_pool_slots",
+    "Maximum versions the warm pool keeps resident.",
 )
 FEATURE_DRIFT = Gauge(
     "modelgate_feature_drift",
