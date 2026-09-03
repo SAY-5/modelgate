@@ -270,6 +270,11 @@ button {
 
 .panel {
   padding: clamp(18px, 3vw, 28px);
+  min-width: 0;
+}
+
+.glass {
+  min-width: 0;
 }
 
 /* ---- controls -------------------------------------------------------- */
