@@ -80,7 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for err in exc.errors():
             reason = rejection_reason(err.get("type", ""))
             reasons.add(reason)
-            loc = ".".join(str(p) for p in err.get("loc", ()) if p != "body")
+            loc = ".".join(p for p in err.get("loc", ()) if isinstance(p, str) and p != "body")
             details.append({"field": loc or "body", "reason": reason, "message": err.get("msg")})
         if request.url.path == "/predict":
             for reason in reasons:

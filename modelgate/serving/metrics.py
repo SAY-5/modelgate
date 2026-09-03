@@ -8,7 +8,10 @@ the exposition text.
 
 from __future__ import annotations
 
-from prometheus_client import Counter, Gauge, Histogram
+from prometheus_client import Counter, Gauge, Histogram, disable_created_metrics
+
+# The *_created companion series double the exposition size without adding signal here.
+disable_created_metrics()
 
 LATENCY_BUCKETS = (
     0.0005,
