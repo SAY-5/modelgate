@@ -18,7 +18,7 @@ export interface CheckLine {
   detail: string;
 }
 
-// Values printed by torch on the committed artifacts (see web/README notes).
+// Values printed by torch on the committed artifacts when the weights were exported.
 const REFERENCE: { trip: Trip; v1: number; v2: number }[] = [
   {
     trip: { distance_km: 5, hour_of_day: 8, day_of_week: 1, pickup_zone_id: 3, traffic_index: 0.7, is_raining: false },
