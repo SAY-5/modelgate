@@ -18,6 +18,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from modelgate import __version__
 from modelgate.model.features import encode
 from modelgate.serving import metrics
+from modelgate.serving.batching import Batcher
 from modelgate.serving.canary import CanaryRouter, CanaryThresholds
 from modelgate.serving.config import Settings
 from modelgate.serving.drift import DriftMonitor
@@ -28,6 +29,7 @@ from modelgate.serving.schemas import (
     PredictResponse,
     PromoteRequest,
     ShadowRequest,
+    WarmRequest,
     rejection_reason,
 )
 from modelgate.serving.shadow import ShadowRecord, ShadowTracker
@@ -39,8 +41,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     # One-row inference is faster without the intra-op thread pool spinning up.
     torch.set_num_threads(1)
-    registry = ModelRegistry(settings.artifacts_dir)
-    shadow_tracker = ShadowTracker(settings.shadow_threshold_minutes, settings.shadow_log_size)
     canary = CanaryRouter(
         CanaryThresholds(
             window_seconds=settings.canary_window_seconds,
@@ -50,6 +50,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             latency_floor_ms=settings.canary_latency_floor_ms,
         )
     )
+    registry = ModelRegistry(
+        settings.artifacts_dir,
+        pool_size=settings.model_pool_size,
+        pad_rows=settings.batch_max_size,
+        extra_pins=lambda: {canary.candidate.version} if canary.candidate else set(),
+    )
+    shadow_tracker = ShadowTracker(settings.shadow_threshold_minutes, settings.shadow_log_size)
+    batcher = Batcher(settings.batch_max_size, settings.batch_max_wait_ms / 1000.0)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -63,6 +71,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if settings.shadow_version:
             await asyncio.to_thread(registry.set_shadow, settings.shadow_version)
             log.info("shadow model loaded: %s", settings.shadow_version)
+        for version in settings.warm_versions:
+            if registry.is_known(version):
+                await asyncio.to_thread(registry.warm, version)
+                log.info("warm pool loaded: %s", version)
         yield
 
     drift = DriftMonitor(
@@ -84,6 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.shadow_tracker = shadow_tracker
     app.state.canary = canary
     app.state.drift = drift
+    app.state.batcher = batcher
     app.state.settings = settings
 
     # ---- auth ------------------------------------------------------------
@@ -150,18 +163,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         served = primary
         candidate = canary.pick(primary)
         if candidate is not None:
-            served, eta = _serve_canary(candidate, primary, features)
+            served, eta = await _serve_canary(candidate, primary, features)
         else:
-            t0 = time.perf_counter()
-            eta = primary.predict(features)
-            canary.record(primary.version, time.perf_counter() - t0, True, primary.version)
+            result = await batcher.submit(primary, features)
+            eta = result.eta
+            canary.record(primary.version, result.infer_s, True, primary.version)
 
         metrics.REQUESTS.labels(version=served.version, outcome="ok").inc()
         metrics.PREDICTIONS_ETA.labels(version=served.version).observe(eta)
 
         shadow = registry.shadow
         if shadow is not None and shadow.version != served.version:
-            _run_shadow(shadow, served, features, eta, request_id)
+            await _run_shadow(shadow, served, features, eta, request_id)
 
         metrics.REQUEST_LATENCY.labels(version=served.version).observe(
             time.perf_counter() - started
@@ -170,27 +183,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             eta_minutes=round(eta, 2), model_version=served.version, request_id=request_id
         )
 
-    def _serve_canary(candidate, primary, features):
+    async def _serve_canary(candidate, primary, features):
         """Run the candidate; on failure answer from the primary and count it against
         the candidate. The client never sees a canary failure."""
         t0 = time.perf_counter()
         try:
-            eta = candidate.predict(features)
+            result = await batcher.submit(candidate, features)
         except Exception:  # noqa: BLE001
             elapsed = time.perf_counter() - t0
             metrics.CANARY_REQUESTS.labels(version=candidate.version, outcome="fallback").inc()
             log.exception("canary inference failed for %s", candidate.version)
             canary.record(candidate.version, elapsed, False, primary.version)
-            return primary, primary.predict(features)
-        elapsed = time.perf_counter() - t0
+            fallback = await batcher.submit(primary, features)
+            return primary, fallback.eta
         metrics.CANARY_REQUESTS.labels(version=candidate.version, outcome="ok").inc()
-        canary.record(candidate.version, elapsed, True, primary.version)
-        return candidate, eta
+        canary.record(candidate.version, result.infer_s, True, primary.version)
+        return candidate, result.eta
 
-    def _run_shadow(shadow, primary, features, primary_eta: float, request_id: str) -> None:
+    async def _run_shadow(shadow, primary, features, primary_eta: float, request_id: str):
         # The shadow path must never affect the client response.
         try:
-            shadow_eta = shadow.predict(features)
+            shadow_eta = (await batcher.submit(shadow, features)).eta
         except Exception:  # noqa: BLE001
             metrics.SHADOW_REQUESTS.labels(shadow=shadow.version, outcome="error").inc()
             shadow_tracker.record_error()
@@ -253,6 +266,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         report["primary"] = registry.primary.version if registry.primary else None
         report["shadow"] = registry.shadow.version if registry.shadow else None
         return report
+
+    @app.post("/admin/warm", dependencies=[Depends(require_admin)])
+    async def admin_warm(body: WarmRequest):
+        if not registry.is_known(body.version):
+            raise HTTPException(404, f"unknown version {body.version!r}")
+        return await asyncio.to_thread(registry.warm, body.version)
 
     @app.post("/admin/canary", dependencies=[Depends(require_admin)])
     async def admin_canary(body: CanaryRequest):

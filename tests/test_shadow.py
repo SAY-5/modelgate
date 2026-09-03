@@ -88,7 +88,7 @@ def test_shadow_failure_never_reaches_client(app, client):
     class Broken:
         version = "v2"
 
-        def predict(self, _):
+        def predict_batch(self, _):
             raise RuntimeError("shadow exploded")
 
     app.state.registry._shadow = Broken()

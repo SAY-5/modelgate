@@ -25,6 +25,10 @@ class Settings:
     drift_warn_threshold: float = 0.1
     drift_alert_threshold: float = 0.25
     drift_refresh_every: int = 100
+    batch_max_size: int = 32
+    batch_max_wait_ms: float = 2.0
+    model_pool_size: int = 3
+    warm_versions: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -46,4 +50,10 @@ class Settings:
             drift_warn_threshold=float(env.get("MODELGATE_DRIFT_WARN_THRESHOLD", "0.1")),
             drift_alert_threshold=float(env.get("MODELGATE_DRIFT_ALERT_THRESHOLD", "0.25")),
             drift_refresh_every=int(env.get("MODELGATE_DRIFT_REFRESH_EVERY", "100")),
+            batch_max_size=int(env.get("MODELGATE_BATCH_MAX_SIZE", "32")),
+            batch_max_wait_ms=float(env.get("MODELGATE_BATCH_MAX_WAIT_MS", "2.0")),
+            model_pool_size=int(env.get("MODELGATE_MODEL_POOL_SIZE", "3")),
+            warm_versions=tuple(
+                v.strip() for v in env.get("MODELGATE_WARM_VERSIONS", "").split(",") if v.strip()
+            ),
         )

@@ -60,6 +60,11 @@ class PromoteRequest(BaseModel):
     version: str
 
 
+class WarmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: str
+
+
 class CanaryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     version: str | None = None

@@ -133,7 +133,7 @@ def test_broken_canary_rolls_back_without_dropping_a_request(app, client):
     class Broken:
         version = "v2"
 
-        def predict(self, _):
+        def predict_batch(self, _):
             raise RuntimeError("candidate exploded")
 
     dropped = metrics.counter_value(metrics.DROPPED_REQUESTS)
@@ -167,9 +167,9 @@ def test_slow_canary_rolls_back_on_latency(app, client):
     class Slow:
         version = "v2"
 
-        def predict(self, features):
+        def predict_batch(self, features):
             time.sleep(0.004)
-            return real.predict(features)
+            return real.predict_batch(features)
 
     rollbacks = metrics.counter_value(metrics.CANARY_ROLLBACKS, reason="latency")
     app.state.canary.thresholds = CanaryThresholds(min_samples=10, latency_ratio=2.0)
