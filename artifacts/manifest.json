@@ -1,5 +1,5 @@
 {
-  "modelgate_version": "3.0.0",
+  "modelgate_version": "4.0.0",
   "seed": 7,
   "dataset": {
     "size": 12000,
@@ -237,7 +237,7 @@
       "metrics": {
         "test_mae_minutes": 3.1051
       },
-      "train_seconds": 1.08
+      "train_seconds": 1.03
     },
     "v2": {
       "file": "eta_v2.pt",
@@ -252,7 +252,7 @@
       "metrics": {
         "test_mae_minutes": 1.888
       },
-      "train_seconds": 0.64
+      "train_seconds": 0.67
     }
   }
 }
