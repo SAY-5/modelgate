@@ -276,10 +276,10 @@
 
 .chart-labels span {
   flex: 1;
+  min-width: 0;
   text-align: center;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
 }
 
 /* ---- section 01: input checks --------------------------------------- */
@@ -303,6 +303,11 @@
   gap: 12px;
   flex-wrap: wrap;
   margin-bottom: 16px;
+}
+
+.builder-head .eyebrow {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .builder-fields {
