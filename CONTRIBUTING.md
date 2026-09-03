@@ -16,7 +16,7 @@ pulled from the CPU wheel index, so the environment installs in under a minute.
   `test:`, `docs:`, `chore:`).
 - `make lint` and `make test` must pass before a pull request. CI runs the same commands
   plus a short load test with a mid-run version swap that fails on any dropped request.
-- Model changes: run `make train` and commit the regenerated `artifacts/` together with the
+- Model changes: run `make train` and commit the rebuilt `artifacts/` together with the
   code. Training is seeded, so the MAE in `artifacts/manifest.json` must match your run.
 - New metrics go in `modelgate/serving/metrics.py` and get a panel in
   `monitoring/grafana/dashboards/modelgate.json` plus a row in the README metrics table.
