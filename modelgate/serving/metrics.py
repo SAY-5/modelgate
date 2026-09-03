@@ -81,6 +81,20 @@ MODEL_LOADED = Gauge(
     "modelgate_models_loaded",
     "Number of model versions resident in memory.",
 )
+FEATURE_DRIFT = Gauge(
+    "modelgate_feature_drift",
+    "Population stability index of the live input window against training, per feature.",
+    ["feature"],
+)
+FEATURE_UNKNOWN_RATE = Gauge(
+    "modelgate_feature_unknown_rate",
+    "Share of recent requests carrying a category the model was not trained on, per feature.",
+    ["feature"],
+)
+DRIFT_SAMPLES = Gauge(
+    "modelgate_drift_window_samples",
+    "Accepted requests currently in the drift window.",
+)
 CANARY_WEIGHT = Gauge(
     "modelgate_canary_weight",
     "Share of /predict traffic routed to the canary candidate (0 when no canary is active).",
