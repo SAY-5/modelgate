@@ -56,9 +56,7 @@ def split(x: torch.Tensor, y: torch.Tensor, seed: int):
     return x[train_idx], y[train_idx], x[test_idx], y[test_idx]
 
 
-def train_one(
-    spec: VersionSpec, x_train: torch.Tensor, y_train: torch.Tensor, seed: int
-) -> EtaNet:
+def train_one(spec: VersionSpec, x_train: torch.Tensor, y_train: torch.Tensor, seed: int) -> EtaNet:
     torch.manual_seed(seed)
     model = EtaNet(hidden=spec.hidden, depth=spec.depth)
     opt = torch.optim.Adam(model.parameters(), lr=spec.lr)

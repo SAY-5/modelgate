@@ -8,8 +8,6 @@ fit rather than a lookup table.
 
 from __future__ import annotations
 
-
-
 import torch
 
 from modelgate.model.features import NUM_ZONES, ZONE_IDS, encode
