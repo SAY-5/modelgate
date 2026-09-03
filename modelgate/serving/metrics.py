@@ -120,6 +120,10 @@ MODEL_POOL_SLOTS = Gauge(
     "modelgate_model_pool_slots",
     "Maximum versions the warm pool keeps resident.",
 )
+REQUEST_LOG_RECORDS = Counter(
+    "modelgate_request_log_records_total",
+    "Accepted requests written to the sampled request log.",
+)
 FEATURE_DRIFT = Gauge(
     "modelgate_feature_drift",
     "Population stability index of the live input window against training, per feature.",

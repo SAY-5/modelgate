@@ -29,6 +29,8 @@ class Settings:
     batch_max_wait_ms: float = 2.0
     model_pool_size: int = 3
     warm_versions: tuple[str, ...] = ()
+    request_log_path: Path | None = None
+    request_log_sample_rate: float = 0.1
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -56,4 +58,8 @@ class Settings:
             warm_versions=tuple(
                 v.strip() for v in env.get("MODELGATE_WARM_VERSIONS", "").split(",") if v.strip()
             ),
+            request_log_path=(
+                Path(env["MODELGATE_REQUEST_LOG"]) if env.get("MODELGATE_REQUEST_LOG") else None
+            ),
+            request_log_sample_rate=float(env.get("MODELGATE_REQUEST_LOG_SAMPLE_RATE", "0.1")),
         )
