@@ -61,7 +61,7 @@ class PromoteRequest(BaseModel):
 
 
 class CanaryRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
     version: str | None = None
     weight: float = Field(default=0.05, gt=0.0, le=1.0, allow_inf_nan=False)
 
