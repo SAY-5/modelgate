@@ -81,6 +81,25 @@ MODEL_LOADED = Gauge(
     "modelgate_models_loaded",
     "Number of model versions resident in memory.",
 )
+CANARY_WEIGHT = Gauge(
+    "modelgate_canary_weight",
+    "Share of /predict traffic routed to the canary candidate (0 when no canary is active).",
+)
+CANARY_INFO = Gauge(
+    "modelgate_canary_info",
+    "1 for the version currently serving as the canary candidate.",
+    ["version"],
+)
+CANARY_REQUESTS = Counter(
+    "modelgate_canary_requests_total",
+    "Requests routed to the canary candidate, by outcome (ok, or fallback to the primary).",
+    ["version", "outcome"],
+)
+CANARY_ROLLBACKS = Counter(
+    "modelgate_canary_rollbacks_total",
+    "Automatic canary rollbacks, by the threshold that fired.",
+    ["reason"],
+)
 
 
 def counter_value(counter: Counter, **labels: str) -> float:
