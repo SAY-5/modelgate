@@ -1,8 +1,8 @@
 """Open-loop load generator that swaps model versions mid-run.
 
 Drives POST /predict at a fixed request rate, optionally enables a shadow run
-at 25% of the run, promotes the candidate version at 50%, and accounts for
-every single request. A request is "dropped" if it got any non-2xx response
+at 25% of the run and a weighted canary at 35%, promotes the candidate version
+at 50%, and accounts for every single request. A request is "dropped" if it got any non-2xx response
 or no response at all (connection error, timeout). The point of the exercise
 is that the dropped count is 0 across the swap.
 
@@ -48,11 +48,13 @@ class RunResult:
     outcomes: list[Outcome] = field(default_factory=list)
     started_wall: float = 0.0
     shadow_at: float | None = None
+    canary_at: float | None = None
     swap_requested_at: float | None = None
     swap_done_at: float | None = None
     swap_record: dict | None = None
     server_dropped_metric: float | None = None
     shadow_report: dict | None = None
+    canary_report: dict | None = None
 
 
 def random_trip(rng: random.Random) -> dict:
@@ -126,6 +128,15 @@ async def run_load(args: argparse.Namespace) -> RunResult:
                     "/admin/shadow", json={"version": args.promote_to}, headers=admin
                 )
                 r.raise_for_status()
+            if args.canary_weight > 0:
+                await asyncio.sleep(max(0.0, args.duration * 0.35 - (time.perf_counter() - start)))
+                result.canary_at = time.perf_counter() - start
+                r = await client.post(
+                    "/admin/canary",
+                    json={"version": args.promote_to, "weight": args.canary_weight},
+                    headers=admin,
+                )
+                r.raise_for_status()
             await asyncio.sleep(max(0.0, args.duration * 0.5 - (time.perf_counter() - start)))
             result.swap_requested_at = time.perf_counter() - start
             r = await client.post(
@@ -149,6 +160,10 @@ async def run_load(args: argparse.Namespace) -> RunResult:
             r = await client.get("/admin/shadow/report", headers=admin)
             if r.status_code == 200:
                 result.shadow_report = r.json()
+        if args.canary_weight > 0:
+            r = await client.get("/admin/canary/report", headers=admin)
+            if r.status_code == 200:
+                result.canary_report = r.json()
         metrics_text = (await client.get("/metrics")).text
         for line in metrics_text.splitlines():
             if line.startswith("modelgate_dropped_requests_total "):
@@ -189,6 +204,9 @@ def summarize(result: RunResult, args: argparse.Namespace) -> dict:
             "mean": round(statistics.fmean(latencies), 2) if latencies else 0.0,
         },
         "shadow_enabled_at_s": round(result.shadow_at, 3) if result.shadow_at else None,
+        "canary_enabled_at_s": round(result.canary_at, 3) if result.canary_at else None,
+        "canary_weight": args.canary_weight,
+        "canary_report": result.canary_report,
         "swap": {
             "from": args.from_version,
             "to": args.promote_to,
@@ -231,6 +249,11 @@ def print_summary(s: dict) -> None:
     )
     if s["shadow_enabled_at_s"] is not None:
         print(f"shadow enabled     t+{s['shadow_enabled_at_s']}s ({s['swap']['to']} shadowing)")
+    if s["canary_enabled_at_s"] is not None:
+        print(
+            f"canary enabled     t+{s['canary_enabled_at_s']}s "
+            f"({s['swap']['to']} at weight {s['canary_weight']})"
+        )
     sw = s["swap"]
     print(
         f"swap {sw['from']} -> {sw['to']}     requested t+{sw['requested_at_s']}s, "
@@ -245,6 +268,14 @@ def print_summary(s: dict) -> None:
             f"shadow report      n={rep['count']} mean|d|={rep['abs_delta_minutes']['mean']} "
             f"p95|d|={rep['abs_delta_minutes']['p95']} "
             f"beyond {rep['threshold_minutes']}min={rep['share_beyond_threshold']}"
+        )
+    if s["canary_report"]:
+        rep = s["canary_report"]
+        cand = rep["versions"].get(s["swap"]["to"], {})
+        print(
+            f"canary report      status={rep['status']} rollbacks={rep['rollbacks']} "
+            f"candidate samples={cand.get('samples', 0)} "
+            f"errors={cand.get('errors', 0)} p95={cand.get('p95_ms', 0.0)}ms"
         )
     print(line)
     verdict = "PASS: 0 dropped requests across the swap" if s["dropped"] == 0 else "FAIL"
@@ -281,6 +312,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--from-version", default="v1")
     p.add_argument("--promote-to", default="v2")
     p.add_argument("--shadow-first", action="store_true")
+    p.add_argument(
+        "--canary-weight",
+        type=float,
+        default=0.0,
+        help="route this share of traffic to the candidate before promoting it (0 = off)",
+    )
     p.add_argument("--admin-token", default=os.environ.get("MODELGATE_ADMIN_TOKEN", "dev-token"))
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--max-connections", type=int, default=512)
