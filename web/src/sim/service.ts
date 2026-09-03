@@ -49,7 +49,7 @@ export interface InFlight {
   request_id: string;
   primary: LoadedModel;
   features: Float32Array;
-  started: number; // performance.now() at admission
+  admitMs: number; // compute spent in validation and encoding
   sentAt: number; // sim seconds
 }
 
@@ -116,15 +116,17 @@ export class Service {
       }
       throw err;
     }
+    const features = encode(result.trip);
     return {
       kind: "inflight",
-      req: { request_id, primary, features: encode(result.trip), started, sentAt: this.simTime },
+      req: { request_id, primary, features, admitMs: performance.now() - started, sentAt: this.simTime },
     };
   }
 
   /** Inference on the captured primary, shadow run, metrics, response. */
   finish(req: InFlight): PredictOutcome {
     const { primary, features, request_id } = req;
+    const t0 = performance.now();
     try {
       const eta = primary.predict(features);
       this.metrics.requests.labels({ version: primary.version, outcome: "ok" }).inc();
@@ -136,7 +138,7 @@ export class Service {
         shadowInfo = this.runShadow(shadow, primary, features, eta, request_id);
       }
 
-      const latencyMs = performance.now() - req.started;
+      const latencyMs = req.admitMs + (performance.now() - t0);
       this.metrics.requestLatency.labels({ version: primary.version }).observe(latencyMs / 1000);
       const out: PredictOk = {
         status: 200,
