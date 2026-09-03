@@ -18,9 +18,11 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from modelgate import __version__
 from modelgate.model.features import encode
 from modelgate.serving import metrics
+from modelgate.serving.canary import CanaryRouter, CanaryThresholds
 from modelgate.serving.config import Settings
 from modelgate.serving.registry import ModelRegistry, NoPrimaryError, UnknownVersionError
 from modelgate.serving.schemas import (
+    CanaryRequest,
     PredictRequest,
     PredictResponse,
     PromoteRequest,
@@ -38,6 +40,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     torch.set_num_threads(1)
     registry = ModelRegistry(settings.artifacts_dir)
     shadow_tracker = ShadowTracker(settings.shadow_threshold_minutes, settings.shadow_log_size)
+    canary = CanaryRouter(
+        CanaryThresholds(
+            window_seconds=settings.canary_window_seconds,
+            min_samples=settings.canary_min_samples,
+            error_rate_delta=settings.canary_error_rate_delta,
+            latency_ratio=settings.canary_latency_ratio,
+            latency_floor_ms=settings.canary_latency_floor_ms,
+        )
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -61,6 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.registry = registry
     app.state.shadow_tracker = shadow_tracker
+    app.state.canary = canary
     app.state.settings = settings
 
     # ---- auth ------------------------------------------------------------
@@ -119,21 +131,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(503, "no primary model loaded") from None
 
         features = torch.tensor([encode(**body.model_dump())], dtype=torch.float32)
-        eta = primary.predict(features)
+        served = primary
+        candidate = canary.pick(primary)
+        if candidate is not None:
+            served, eta = _serve_canary(candidate, primary, features)
+        else:
+            t0 = time.perf_counter()
+            eta = primary.predict(features)
+            canary.record(primary.version, time.perf_counter() - t0, True, primary.version)
 
-        metrics.REQUESTS.labels(version=primary.version, outcome="ok").inc()
-        metrics.PREDICTIONS_ETA.labels(version=primary.version).observe(eta)
+        metrics.REQUESTS.labels(version=served.version, outcome="ok").inc()
+        metrics.PREDICTIONS_ETA.labels(version=served.version).observe(eta)
 
         shadow = registry.shadow
-        if shadow is not None and shadow.version != primary.version:
-            _run_shadow(shadow, primary, features, eta, request_id)
+        if shadow is not None and shadow.version != served.version:
+            _run_shadow(shadow, served, features, eta, request_id)
 
-        metrics.REQUEST_LATENCY.labels(version=primary.version).observe(
+        metrics.REQUEST_LATENCY.labels(version=served.version).observe(
             time.perf_counter() - started
         )
         return PredictResponse(
-            eta_minutes=round(eta, 2), model_version=primary.version, request_id=request_id
+            eta_minutes=round(eta, 2), model_version=served.version, request_id=request_id
         )
+
+    def _serve_canary(candidate, primary, features):
+        """Run the candidate; on failure answer from the primary and count it against
+        the candidate. The client never sees a canary failure."""
+        t0 = time.perf_counter()
+        try:
+            eta = candidate.predict(features)
+        except Exception:  # noqa: BLE001
+            elapsed = time.perf_counter() - t0
+            metrics.CANARY_REQUESTS.labels(version=candidate.version, outcome="fallback").inc()
+            log.exception("canary inference failed for %s", candidate.version)
+            canary.record(candidate.version, elapsed, False, primary.version)
+            return primary, primary.predict(features)
+        elapsed = time.perf_counter() - t0
+        metrics.CANARY_REQUESTS.labels(version=candidate.version, outcome="ok").inc()
+        canary.record(candidate.version, elapsed, True, primary.version)
+        return candidate, eta
 
     def _run_shadow(shadow, primary, features, primary_eta: float, request_id: str) -> None:
         # The shadow path must never affect the client response.
@@ -202,6 +238,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         report["shadow"] = registry.shadow.version if registry.shadow else None
         return report
 
+    @app.post("/admin/canary", dependencies=[Depends(require_admin)])
+    async def admin_canary(body: CanaryRequest):
+        if body.version is None:
+            canary.clear()
+            return {"candidate": None, "weight": 0.0, "status": canary.status}
+        if not registry.is_known(body.version):
+            raise HTTPException(404, f"unknown version {body.version!r}")
+        if registry.primary and body.version == registry.primary.version:
+            raise HTTPException(409, "canary version must differ from the primary")
+        candidate = await asyncio.to_thread(registry.load, body.version)
+        canary.start(candidate, body.weight)
+        return {"candidate": candidate.version, "weight": body.weight, "status": canary.status}
+
+    @app.get("/admin/canary/report", dependencies=[Depends(require_admin)])
+    async def admin_canary_report():
+        return canary.report(registry.primary.version if registry.primary else None)
+
     @app.post("/admin/promote", dependencies=[Depends(require_admin)])
     async def admin_promote(body: PromoteRequest):
         if not registry.is_known(body.version):
@@ -210,6 +263,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             record = await asyncio.to_thread(registry.promote, body.version)
         except UnknownVersionError:
             raise HTTPException(404, f"unknown version {body.version!r}") from None
+        # A version cannot be both the primary and its own canary.
+        if canary.candidate is not None and canary.candidate.version == body.version:
+            canary.clear()
         return record
 
     @app.post("/admin/rollback", dependencies=[Depends(require_admin)])
