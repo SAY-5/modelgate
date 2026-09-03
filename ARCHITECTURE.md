@@ -27,11 +27,55 @@ state.
 Rollback is the same swap with the roles of `_primary` and `_previous` exchanged, so it is
 instant and does not reload anything.
 
+**Warm pool.** `promote()` on a version that is not resident loads it first, which is the
+only part of a swap that takes measurable time. `warm()` does that load ahead of time into
+a spare slot, so the later promote finds the version resident, records `prewarmed: true`
+and `load_seconds: 0`, and goes straight to the reference assignment. The pool keeps at
+most `pool_size` versions; when it is over capacity it evicts the least recently touched
+version that holds no role. The primary, the previous version (rollback target), the
+shadow, and whatever the app pins (the canary candidate) are never evicted, and the version
+being warmed is protected during its own warm call. Eviction only removes the cache entry;
+a request that captured a reference to an evicted model finishes on it.
+
 `modelgate_dropped_requests_total` counts any `/predict` that ended in a 5xx: an unhandled
 exception, or a call with no primary loaded. The load generator counts every request it
 sent and reports any non-2xx or connection failure as dropped. Both numbers stay at 0
 across the swap in `make demo`; the tests in `tests/test_swap_zero_drop.py` assert the same
 in-process with 2000 requests over 50 workers, using both asyncio and threads.
+
+## Micro-batching
+
+`Batcher` in `modelgate/serving/batching.py` queues feature rows per loaded model on the
+event loop and runs them in one forward pass. A batch starts when it holds
+`max_batch_size` rows or `max_wait_s` after its first row arrived, and queues drain in
+FIFO order, so a request waits at most `max_wait_s` plus one batch execution for every
+`max_batch_size` rows queued ahead of it. Flushes are scheduled on the loop rather than run
+inline in the submitting call, so every waiter is parked on its future before results land
+and wakes in submission order; `tests/test_batching.py` asserts the completion order of
+100 rows over batches of 8.
+
+Batching only helps when arrivals overlap. A row that arrives more than `max_wait_s` after
+the previous one for its model is treated as sparse and runs on the next loop step; rows
+within `max_wait_s` of each other are held so they can share a pass. At 200 rps with 5 ms
+between arrivals nothing waits, which keeps the single-row p50 at 1.7 ms; a burst of 16
+concurrent requests forms batches. For this MLP the forward pass is about 0.2 ms of a
+1.5 ms request, so batching does not move throughput much; the mechanism is here for the
+day the model is heavier.
+
+**Exactness.** Small-matrix kernels choose different blocking for different row counts, so
+`net(x[i:i+1])` and `net(x)[i]` can differ in the last bit; a 2 decimal rounding then
+flips for the occasional row. `LoadedModel.predict_batch` therefore pads every forward
+pass to exactly `pad_rows` rows (the batch size) with zero rows and slices the result. A
+row's output depends only on its own values and the row count, which is now constant, so a
+request gets the same bits alone, in a batch of 5, or in a batch of 32. The single-row
+`predict()` goes through the same padded path. The tests compare 600 rows over 60 random
+batch compositions per version and find no mismatch, and the swap test under batching
+checks every one of 2000 responses against the single-row answer of the version that
+served it.
+
+Model failures inside a batch set the exception on every waiter in that batch and the
+queue keeps draining. For the primary that is an unhandled error and counts as a drop, as
+before; for a canary candidate `_serve_canary` catches it and answers from the primary.
 
 ## Shadow runs
 

@@ -26,6 +26,13 @@ Python 3.12, PyTorch (CPU), FastAPI, prometheus_client, Grafana, uv.
   window of accepted inputs and reports a population stability index per feature, the
   unknown-category rate, and live versus training statistics on `GET /admin/drift` and as
   `modelgate_feature_drift` gauges.
+- Micro-batches concurrent `/predict` calls. Requests for the same model are queued on the
+  event loop and run in one forward pass, up to a maximum batch size or a maximum wait,
+  FIFO. Every forward pass is padded to a fixed row count, so a request gets bit-identical
+  output alone or in a full batch. Sparse traffic skips the wait entirely.
+- Keeps a warm pool of resident versions. `POST /admin/warm` loads and warms a candidate
+  into a spare slot so the later promote swaps in 0 s without touching disk; the pool
+  evicts the least recently used version that holds no role when it is over capacity.
 - Swaps versions atomically. The candidate is loaded and warmed off the request path, then
   the primary reference is replaced in O(1) under a lock. In-flight requests finish on the
   model they started with. `make demo` proves this with a 200 rps load test that promotes
@@ -42,6 +49,9 @@ Python 3.12, PyTorch (CPU), FastAPI, prometheus_client, Grafana, uv.
   POST /predict  ------> |  pydantic strict schema -> 422 + rejection metric |
                          |        |                                         |
                          |        v                                         |
+                         |  Batcher: FIFO micro-batches per model, padded   |
+                         |        |                                         |
+                         |        v                                         |
                          |  DriftMonitor: rolling window vs manifest stats  |
                          |        |                                         |
                          |        v                                         |
@@ -53,6 +63,7 @@ Python 3.12, PyTorch (CPU), FastAPI, prometheus_client, Grafana, uv.
                          |    canary  ---> LoadedModel(v2)  --> response    |
                          |    shadow  ---> LoadedModel(v2)  --> divergence  |
                          |    previous     (rollback target)    log+metrics |
+                         |    warm pool    (spare slots, LRU eviction)      |
                          |        ^                                         |
   admin (X-Admin-Token)  |        | load + warm in thread, swap under lock   |
   POST /admin/promote -> |  /admin/shadow /admin/canary /admin/drift ...    |
@@ -142,9 +153,10 @@ checks that the weights and MAE match.
 | GET    | `/healthz`             | no   | Process liveness. |
 | GET    | `/readyz`              | no   | 200 once a primary model is loaded, otherwise 503. |
 | GET    | `/metrics`             | no   | Prometheus exposition. |
-| GET    | `/admin/versions`      | token | Available versions, roles, load state, swap history. |
+| GET    | `/admin/versions`      | token | Available versions, roles, load state, pool residency, swap history with `prewarmed` and `load_seconds`. |
 | POST   | `/admin/shadow`        | token | `{version}` starts shadowing that version; `{version: null}` stops. |
 | GET    | `/admin/shadow/report` | token | Divergence stats: count, mean/p50/p95/max abs delta, relative delta, share beyond threshold, bias. |
+| POST   | `/admin/warm`          | token | `{version}` loads and warms a version into the pool; reports `load_seconds` and what was evicted. |
 | POST   | `/admin/canary`        | token | `{version, weight}` routes `weight` (0..1] of traffic to that version; `{version: null}` clears. |
 | GET    | `/admin/canary/report` | token | Canary status, weight, per-version samples, error rate, p50/p95 inference latency, thresholds, last rollback. |
 | GET    | `/admin/drift`         | token | Per-feature drift score, status (`insufficient`, `stable`, `moderate`, `drifted`), unknown-category rate, live and training statistics. |
@@ -183,6 +195,13 @@ Validation rules on `/predict` (any failure is a 422 with `{"error", "rejections
 | `modelgate_version_swaps_total` | counter | `kind` (`promote`, `rollback`) | Primary swaps. |
 | `modelgate_dropped_requests_total` | counter | | Requests that failed for a reason other than invalid input. Stays 0. |
 | `modelgate_models_loaded` | gauge | | Versions resident in memory. |
+| `modelgate_batch_size` | histogram | `version` | Rows per executed inference batch. |
+| `modelgate_batch_queue_wait_seconds` | histogram | `version` | Time a request spent queued before its batch started. |
+| `modelgate_batches_total` | counter | `version` | Inference batches executed. |
+| `modelgate_swap_load_seconds` | histogram | `prewarmed` | Load and warm time before a promote could swap; 0 when the version was already resident. |
+| `modelgate_warm_loads_total` | counter | `hit` | Explicit warm requests, by whether the version was already resident. |
+| `modelgate_model_evictions_total` | counter | | Versions evicted from the pool. |
+| `modelgate_model_pool_slots` | gauge | | Pool capacity. |
 | `modelgate_feature_drift` | gauge | `feature` | PSI of the live input window against training; 0 until `MODELGATE_DRIFT_MIN_SAMPLES` is reached. |
 | `modelgate_feature_unknown_rate` | gauge | `feature` | Share of recent requests carrying a category not seen in training. |
 | `modelgate_drift_window_samples` | gauge | | Accepted requests in the drift window. |
@@ -222,22 +241,45 @@ drawn as annotations across every time series.
 | `MODELGATE_DRIFT_WARN_THRESHOLD` | `0.1` | PSI at or above this is `moderate`. |
 | `MODELGATE_DRIFT_ALERT_THRESHOLD` | `0.25` | PSI at or above this is `drifted`. |
 | `MODELGATE_DRIFT_REFRESH_EVERY` | `100` | Observations between gauge refreshes; the report always recomputes. |
+| `MODELGATE_BATCH_MAX_SIZE` | `32` | Rows per inference batch and the padded row count of every forward pass. `1` disables batching. |
+| `MODELGATE_BATCH_MAX_WAIT_MS` | `2.0` | Longest a dense-traffic request is held for others to join its batch. |
+| `MODELGATE_MODEL_POOL_SIZE` | `3` | Versions kept resident; role holders are never evicted. |
+| `MODELGATE_WARM_VERSIONS` | unset | Comma-separated versions to warm at startup. |
 
 ## Layout
 
 ```
 modelgate/model/      features.py, net.py, data.py, stats.py, train.py
-modelgate/serving/    app.py, registry.py, schemas.py, shadow.py, canary.py, drift.py, metrics.py, config.py
+modelgate/serving/    app.py, registry.py, batching.py, schemas.py, shadow.py, canary.py, drift.py,
+                      metrics.py, config.py
 artifacts/            eta_v1.pt, eta_v2.pt, manifest.json (committed, reproducible)
-loadtest/run.py       open-loop load generator with mid-run canary and promote
+loadtest/run.py       open-loop load generator with mid-run warm, canary, and promote
 monitoring/           prometheus.yml, grafana provisioning and dashboard
-tests/                validation, registry, shadow, canary, drift, zero-drop swap, metrics, training
+tests/                validation, registry, shadow, canary, drift, batching, pool, zero-drop swap,
+                      metrics, training
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the swap mechanism, shadow design, and the
 reasoning behind the validation and metrics choices.
 
 ## Changelog
+
+### 4.0.0
+
+- Dynamic micro-batching of concurrent `/predict` calls per model, FIFO, with a maximum
+  batch size and maximum wait. Every forward pass is padded to the batch size, so results
+  are bit-identical whether a row ran alone or in a full batch; the swap tests assert this
+  across a promote under 50 workers.
+- The wait is adaptive: a request that arrives more than the max wait after the previous
+  one runs immediately, so sparse traffic keeps single-row latency (p50 1.7 ms at 200 rps
+  on this machine, unchanged from 3.0.0).
+- Warm pool: `POST /admin/warm` loads a version into a spare slot; the following promote
+  reports `prewarmed: true` and `load_seconds: 0`. Versions with no role are evicted LRU
+  when the pool is over capacity; the primary, previous, shadow, and canary never are.
+- New metrics for batch size, queue wait, batches, swap load time, warm hits, and
+  evictions. `loadtest.run --prewarm --burst N` exercises both.
+- For this 19-input MLP the forward pass is about 0.2 ms of a 1.5 ms request, so batching
+  changes throughput little; the mechanism matters for heavier models.
 
 ### 3.0.0
 
