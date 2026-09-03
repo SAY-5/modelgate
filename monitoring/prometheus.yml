@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: modelgate
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["modelgate:8000"]
+        labels:
+          service: modelgate
