@@ -197,3 +197,16 @@ tests/                validation, registry, shadow, zero-drop swap, metrics, tra
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the swap mechanism, shadow design, and the
 reasoning behind the validation and metrics choices.
+
+## Changelog
+
+### 1.0.0
+
+- `POST /predict` for the ETA MLP with strict input validation (types, ranges, known
+  zones, finite floats, no unknown fields) and per-reason rejection counters.
+- Model registry with a primary and an optional shadow version; shadow divergence is
+  recorded on every request and summarised by `GET /admin/shadow/report`.
+- Atomic version swaps: load and warm off the request path, swap under a lock, in-flight
+  requests finish on the model they started with. 0 dropped requests in the load test.
+- Prometheus metrics for traffic, latency, ETA distribution, rejections, shadow divergence,
+  swaps, and drops, with a provisioned Grafana dashboard.
