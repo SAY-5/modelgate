@@ -36,17 +36,18 @@ def assert_reproduces(actual, expected, tolerances: dict[str, Decimal], path: st
     """Assert a regenerated structure matches a committed artifact.
 
     Structure, strings, booleans and integers must match exactly. A number may differ by the
-    tolerance declared for it, because the dataset comes out of torch's vectorised `exp`, whose last
-    bit differs between CPU architectures: a value sitting on a rounding boundary rounds one way on
-    arm64 and the other on x86-64, and the committed fixture records `distance_km` 8.5 where a Linux
-    runner regenerates 8.499.
+    tolerance declared for it, because an artifact does not regenerate bit for bit on a different
+    CPU architecture: a value sitting on a rounding boundary lands one unit apart between the two
+    hosts, and the committed fixture, made on arm64, records `distance_km` 8.499 where the x86-64
+    CI runner regenerates 8.5.
 
     `tolerances` maps a key to the largest difference that is not a change in behaviour. For a value
     the generator rounds, that is one unit in its last place; for a value derived from one, it also
     has to cover how far the derivation carries that shift, which the caller states and measures. A
     key may name the number itself or a container whose numbers share a tolerance, which is how a
-    frequency table of category keys is covered. A number with no declared tolerance anywhere above
-    it must match exactly, so a new field cannot pick one up by accident.
+    frequency table of category keys is covered. A fractional number with no tolerance declared for
+    it or for a container above it is refused, even when it is equal, so every fractional field has
+    to declare one and a new field cannot pass unchecked.
     """
     if isinstance(expected, dict):
         assert isinstance(actual, dict), f"{path}: expected an object, got {type(actual).__name__}"

@@ -178,12 +178,16 @@ MAE 3.565. Training is deterministic for a given seed; the test suite trains twi
 checks that the weights and MAE match.
 
 The committed artifacts regenerate from their seed, but not bit for bit on a different CPU
-architecture: the dataset comes out of torch's vectorised `exp`, whose last bit differs between
-arm64 and x86-64, so a value sitting on a rounding boundary rounds one way on each. The fixture
-records `distance_km` 8.5 where a Linux runner regenerates 8.499, and a six decimal statistic can
-land one unit apart. The tests that compare a regenerated artifact against a committed one therefore
-hold every number to one unit in the last place the producing code rounds to, declared per field,
-and still require the structure, the integers, the strings and the booleans to match exactly.
+architecture: a value sitting on a rounding boundary lands one unit apart between the two hosts.
+`tests/fixtures/replay_log.jsonl`, made on arm64, records `distance_km` 8.499 where the x86-64 CI
+runner regenerates 8.5, and a six decimal statistic can land one unit apart. The tests that
+compare a regenerated artifact against a committed one therefore hold each number to the
+tolerance declared for its field: 0.001 for `distance_km` and 0.0001 for `traffic_index`, one
+unit in the last place the generator rounds them to; 0.000001 for the training statistics, which
+`modelgate/model/stats.py` rounds to six decimals; and 0.02 for the two eta fields, which are
+derived from those inputs and carry their shift. A fractional number with no tolerance declared
+for it or a container above it is refused, so every fractional field has to declare one, and the
+structure, the integers, the strings and the booleans still have to match exactly.
 
 ## API
 
@@ -316,11 +320,41 @@ reasoning behind the validation and metrics choices.
 | 3.0.0 | Feature drift: training statistics in the manifest, PSI per feature over a rolling window, unknown-category rate, `GET /admin/drift` and gauges. |
 | 4.0.0 | Micro-batching with padded forward passes for bit-identical results, adaptive wait, FIFO fairness; warm model pool with `POST /admin/warm` and LRU eviction of role-free versions. |
 | 5.0.0 | Sampled PII-free request log and `modelgate eval`: replay against two versions with MAE, calibration, divergence, and a logged-versus-replayed consistency check. |
+| 5.0.1 | A suite that passes on any host: regenerated artifacts compared within a tolerance declared per field, wider canary and batching budgets; the browser demo on Vite 7.3.6 with 0 npm audit findings. |
 
 Every release passed `ruff check`, `ruff format --check`, the full test suite, and the load
 test with a mid-run swap at 0 dropped requests before it was tagged.
 
 ## Changelog
+
+### 5.0.1
+
+- Two tests compared a regenerated artifact with the committed one exactly, which does not
+  hold across CPU architectures: regenerated from its seed on the x86-64 CI runner,
+  `tests/fixtures/replay_log.jsonl` gets `distance_km` 8.5 on the row where the committed file
+  records 8.499, and the `distance_km` standard deviation in `artifacts/manifest.json` comes
+  out 4.990105 against the recorded 4.990104, while an arm64 Mac reproduces both exactly.
+- Both now compare through `assert_reproduces` in `tests/conftest.py`, which holds each number
+  to a tolerance declared per field: 0.001 for `distance_km` and 0.0001 for `traffic_index`,
+  0.000001 for the training statistics, and 0.02 for the two eta fields derived from those
+  inputs. Keys, field order, line count, integers, strings and booleans still have to match
+  exactly, and a fractional number with no tolerance declared for it or a container above it
+  is refused. `tests/test_artifact_tolerance.py` pins what the comparison admits and rejects,
+  and `tests/measure_eta_shift.py` measures what the eta tolerance has to carry: one unit in
+  the last place of each input moves the reference eta by at most 0.0094 minutes and the
+  served prediction by at most 0.0028.
+- `test_healthy_canary_stays_active`, whose healthy v2 canary was rolled back on the CI
+  runner, raises `latency_floor_ms` to 250 ms, and `test_slow_canary_rolls_back_on_latency`
+  still proves the rule with a 4 ms delay injected into the candidate. The batching test's
+  `max_wait` rises from 5 ms to 50 ms with its assertions unchanged.
+- The browser demo under `web/` moves from Vite 5.4.21 to 7.3.6 and `@vitejs/plugin-react`
+  from 4.7.0 to 5.2.0 and declares node `^20.19.0 || >=22.12.0`. `npm audit` over
+  `web/package-lock.json` reported esbuild (moderate, GHSA-67mh-4wv8-2f99) and Vite (high,
+  three advisories including GHSA-fx2h-pf6j-xcff) at 5.0.0 and reports 0 vulnerabilities at
+  5.0.1. A `web` CI job runs `npm ci`, the type-check, the 15 self-check assertions and the
+  production bundle.
+- 116 tests, passing on the x86-64 CI runner and on an arm64 Mac, and the load test with
+  shadow, pre-warm, a 0.1 canary and a mid-run swap drops 0 of 1800 requests.
 
 ### 5.0.0
 

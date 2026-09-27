@@ -35,3 +35,20 @@ jobs:
 
       - name: Load test with mid-run version swap
         run: uv run python -m loadtest.run --spawn-server --rps 150 --duration 12 --shadow-first --prewarm --canary-weight 0.1 --fail-on-drops
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run selfcheck
+      - run: npm run build

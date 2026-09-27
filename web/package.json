@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "selfcheck": "tsx src/sim/selfcheck.ts"
+    "selfcheck": "tsx src/sim/selfcheck.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "framer-motion": "^11.11.17",

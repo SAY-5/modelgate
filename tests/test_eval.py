@@ -31,10 +31,11 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "replay_log.jsonl"
 FIXTURE_SIZE = 300
 # The largest difference in each field that is not a change in behaviour. The two inputs are one
 # unit in the last place the generator rounds them to. The two eta fields are derived from those
-# inputs, so their tolerance also has to carry that shift through: measured over this fixture, one
-# unit in the last place of an input moves the reference eta by at most 0.0094 minutes and the
-# served prediction by at most 0.0028, so 0.02 covers the shift and the field's own rounding with
-# room to spare, while still being far tighter than any real change in the model or the formula.
+# inputs, so their tolerance also has to carry that shift through: measured over this fixture by
+# tests/measure_eta_shift.py, one unit in the last place of each input moves the reference eta by
+# at most 0.0094 minutes and the served prediction by at most 0.0028, so 0.02 covers the shift and
+# the field's own rounding with room to spare, while still being far tighter than any real change
+# in the model or the formula.
 FIXTURE_TOLERANCES = {
     "distance_km": Decimal("0.001"),
     "traffic_index": Decimal("0.0001"),
@@ -62,11 +63,11 @@ def make_fixture_records() -> list[dict]:
 
 
 def test_fixture_is_reproducible_from_the_seeded_dataset():
-    # Record for record rather than byte for byte: the dataset comes out of torch's vectorised exp,
-    # whose last bit differs between CPU architectures, so a value on a rounding boundary rounds one
-    # way on arm64 and the other on x86-64 (distance_km 8.5 against 8.499 in the committed fixture).
-    # Each number is therefore held to one unit in the last decimal the fixture records, and the
-    # keys, the order, the line count and every integer, string and boolean still have to match.
+    # Record for record rather than byte for byte: a value on a rounding boundary lands one unit
+    # apart between CPU architectures, and the committed fixture, made on arm64, records distance_km
+    # 8.499 where the x86-64 CI runner regenerates 8.5. Each number is therefore held to the
+    # tolerance FIXTURE_TOLERANCES declares for its field, and the keys, the order, the line count
+    # and every integer, string and boolean still have to match.
     recorded = [json.loads(line, parse_float=Decimal) for line in FIXTURE.read_text().splitlines()]
     regenerated = make_fixture_records()
     assert len(recorded) == len(regenerated) == FIXTURE_SIZE
