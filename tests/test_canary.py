@@ -183,7 +183,11 @@ def test_slow_canary_rolls_back_on_latency(app, client):
 
 
 def test_healthy_canary_stays_active(app, client):
-    app.state.canary.thresholds = CanaryThresholds(min_samples=10)
+    # v2 is a wider net than v1, so a few milliseconds of inference make its p95 exceed twice the
+    # primary's on a loaded runner even when nothing is wrong: that is what latency_floor_ms is for,
+    # and it is lifted here above anything a shared runner produces. The guard itself is asserted in
+    # test_slow_canary_rolls_back_on_latency, which injects a delay rather than trusting the host.
+    app.state.canary.thresholds = CanaryThresholds(min_samples=10, latency_floor_ms=250.0)
     client.post("/admin/canary", json={"version": "v2", "weight": 0.5}, headers=ADMIN)
     for i in range(200):
         assert (
