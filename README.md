@@ -178,12 +178,16 @@ MAE 3.565. Training is deterministic for a given seed; the test suite trains twi
 checks that the weights and MAE match.
 
 The committed artifacts regenerate from their seed, but not bit for bit on a different CPU
-architecture: the dataset comes out of torch's vectorised `exp`, whose last bit differs between
-arm64 and x86-64, so a value sitting on a rounding boundary rounds one way on each. The fixture
-records `distance_km` 8.5 where a Linux runner regenerates 8.499, and a six decimal statistic can
-land one unit apart. The tests that compare a regenerated artifact against a committed one therefore
-hold every number to one unit in the last place the producing code rounds to, declared per field,
-and still require the structure, the integers, the strings and the booleans to match exactly.
+architecture: a value sitting on a rounding boundary lands one unit apart between the two hosts.
+`tests/fixtures/replay_log.jsonl`, made on arm64, records `distance_km` 8.499 where the x86-64 CI
+runner regenerates 8.5, and a six decimal statistic can land one unit apart. The tests that
+compare a regenerated artifact against a committed one therefore hold each number to the
+tolerance declared for its field: 0.001 for `distance_km` and 0.0001 for `traffic_index`, one
+unit in the last place the generator rounds them to; 0.000001 for the training statistics, which
+`modelgate/model/stats.py` rounds to six decimals; and 0.02 for the two eta fields, which are
+derived from those inputs and carry their shift. A fractional number with no tolerance declared
+for it or a container above it is refused, so every fractional field has to declare one, and the
+structure, the integers, the strings and the booleans still have to match exactly.
 
 ## API
 
