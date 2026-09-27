@@ -29,9 +29,18 @@ from tests.conftest import ADMIN, ARTIFACTS, GOOD_INPUT, assert_reproduces, make
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "replay_log.jsonl"
 FIXTURE_SIZE = 300
-# The precision each field is rounded to: distance_km and traffic_index in modelgate/model/data.py,
-# the two eta fields in make_fixture_records below.
-FIXTURE_DECIMALS = {"distance_km": 3, "traffic_index": 4, "eta_minutes": 2, "actual_eta_minutes": 3}
+# The largest difference in each field that is not a change in behaviour. The two inputs are one
+# unit in the last place the generator rounds them to. The two eta fields are derived from those
+# inputs, so their tolerance also has to carry that shift through: measured over this fixture, one
+# unit in the last place of an input moves the reference eta by at most 0.0094 minutes and the
+# served prediction by at most 0.0028, so 0.02 covers the shift and the field's own rounding with
+# room to spare, while still being far tighter than any real change in the model or the formula.
+FIXTURE_TOLERANCES = {
+    "distance_km": Decimal("0.001"),
+    "traffic_index": Decimal("0.0001"),
+    "eta_minutes": Decimal("0.02"),
+    "actual_eta_minutes": Decimal("0.02"),
+}
 FIXTURE_SEED = 99
 
 
@@ -63,7 +72,7 @@ def test_fixture_is_reproducible_from_the_seeded_dataset():
     assert len(recorded) == len(regenerated) == FIXTURE_SIZE
     for i, (actual, expected) in enumerate(zip(regenerated, recorded, strict=True)):
         assert list(actual) == list(expected), f"record {i}: field order differs"
-        assert_reproduces(actual, expected, FIXTURE_DECIMALS, f"record {i}")
+        assert_reproduces(actual, expected, FIXTURE_TOLERANCES, f"record {i}")
     # The file is still one compact JSON object per line with a trailing newline.
     assert FIXTURE.read_text().endswith("}\n")
     assert all(

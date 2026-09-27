@@ -49,10 +49,13 @@ def test_manifest_carries_training_stats_for_every_input():
     # vectorised exp, whose last bit differs between CPU architectures, so a value on a rounding
     # boundary rounds one way on arm64 and the other on x86-64.
     # modelgate/model/stats.py rounds every figure it reports to six decimals, the frequency and
-    # quantile tables included, so their category keys inherit the precision of their container.
-    six = dict.fromkeys(["mean", "std", "min", "max", "bin_edges", "quantiles", "frequencies"], 6)
+    # quantile tables included, so their category keys inherit their container's tolerance.
+    one_place = Decimal("0.000001")
+    tolerances = dict.fromkeys(
+        ["mean", "std", "min", "max", "bin_edges", "quantiles", "frequencies"], one_place
+    )
     regenerated = compute_training_stats(_rows(12000, MANIFEST["seed"]))
-    assert_reproduces(regenerated, RECORDED["training_stats"], six, "training_stats")
+    assert_reproduces(regenerated, RECORDED["training_stats"], tolerances, "training_stats")
 
 
 def test_training_like_traffic_is_stable():
