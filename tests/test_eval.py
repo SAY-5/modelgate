@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
 
 import torch
@@ -24,10 +25,13 @@ from modelgate.serving import metrics
 from modelgate.serving.app import create_app
 from modelgate.serving.registry import ModelRegistry
 from modelgate.serving.reqlog import INPUT_FIELDS, RequestLog
-from tests.conftest import ADMIN, ARTIFACTS, GOOD_INPUT, make_settings
+from tests.conftest import ADMIN, ARTIFACTS, GOOD_INPUT, assert_reproduces, make_settings
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "replay_log.jsonl"
 FIXTURE_SIZE = 300
+# The precision each field is rounded to: distance_km and traffic_index in modelgate/model/data.py,
+# the two eta fields in make_fixture_records below.
+FIXTURE_DECIMALS = {"distance_km": 3, "traffic_index": 4, "eta_minutes": 2, "actual_eta_minutes": 3}
 FIXTURE_SEED = 99
 
 
@@ -49,8 +53,22 @@ def make_fixture_records() -> list[dict]:
 
 
 def test_fixture_is_reproducible_from_the_seeded_dataset():
-    expected = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in make_fixture_records())
-    assert FIXTURE.read_text() == expected
+    # Record for record rather than byte for byte: the dataset comes out of torch's vectorised exp,
+    # whose last bit differs between CPU architectures, so a value on a rounding boundary rounds one
+    # way on arm64 and the other on x86-64 (distance_km 8.5 against 8.499 in the committed fixture).
+    # Each number is therefore held to one unit in the last decimal the fixture records, and the
+    # keys, the order, the line count and every integer, string and boolean still have to match.
+    recorded = [json.loads(line, parse_float=Decimal) for line in FIXTURE.read_text().splitlines()]
+    regenerated = make_fixture_records()
+    assert len(recorded) == len(regenerated) == FIXTURE_SIZE
+    for i, (actual, expected) in enumerate(zip(regenerated, recorded, strict=True)):
+        assert list(actual) == list(expected), f"record {i}: field order differs"
+        assert_reproduces(actual, expected, FIXTURE_DECIMALS, f"record {i}")
+    # The file is still one compact JSON object per line with a trailing newline.
+    assert FIXTURE.read_text().endswith("}\n")
+    assert all(
+        line.startswith('{"at":') and ", " not in line for line in FIXTURE.read_text().splitlines()
+    )
 
 
 def test_load_log_validates_inputs_and_counts_skips(tmp_path):
