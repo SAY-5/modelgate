@@ -31,10 +31,11 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "replay_log.jsonl"
 FIXTURE_SIZE = 300
 # The largest difference in each field that is not a change in behaviour. The two inputs are one
 # unit in the last place the generator rounds them to. The two eta fields are derived from those
-# inputs, so their tolerance also has to carry that shift through: measured over this fixture, one
-# unit in the last place of an input moves the reference eta by at most 0.0094 minutes and the
-# served prediction by at most 0.0028, so 0.02 covers the shift and the field's own rounding with
-# room to spare, while still being far tighter than any real change in the model or the formula.
+# inputs, so their tolerance also has to carry that shift through: measured over this fixture by
+# tests/measure_eta_shift.py, one unit in the last place of each input moves the reference eta by
+# at most 0.0094 minutes and the served prediction by at most 0.0028, so 0.02 covers the shift and
+# the field's own rounding with room to spare, while still being far tighter than any real change
+# in the model or the formula.
 FIXTURE_TOLERANCES = {
     "distance_km": Decimal("0.001"),
     "traffic_index": Decimal("0.0001"),
