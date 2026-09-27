@@ -1,9 +1,10 @@
 """What `assert_reproduces` admits when a committed artifact is regenerated.
 
-The committed dataset comes out of torch's vectorised `exp`, whose last bit differs between CPU
-architectures, so a value sitting on a rounding boundary rounds one way on arm64 and the other on
-x86-64: the fixture records `distance_km` 8.5 where a Linux runner regenerates 8.499. The
-comparison therefore admits one unit in the last decimal a file records, and nothing looser.
+A committed artifact does not regenerate bit for bit on a different CPU architecture: a value
+sitting on a rounding boundary lands one unit apart between the two hosts, and the fixture, made
+on arm64, records `distance_km` 8.499 where the x86-64 CI runner regenerates 8.5. The comparison
+therefore admits the tolerance declared for each field, one unit in the last place for a value
+the generator rounds and a stated allowance for a value derived from one, and nothing looser.
 """
 
 from __future__ import annotations
@@ -70,7 +71,7 @@ def test_anything_larger_or_structural_fails(regenerated):
         assert_reproduces(regenerated, RECORDED, TOLERANCES)
 
 
-def test_a_decimal_without_a_declared_tolerance_must_match_exactly():
+def test_a_decimal_without_a_declared_tolerance_is_refused_even_when_equal():
     recorded = json.loads('{"unmapped":1.25}', parse_float=Decimal)
     assert_reproduces({"unmapped": 1.25}, recorded, {"unmapped": Decimal("0.01")})
     with pytest.raises(AssertionError, match="no declared tolerance"):
