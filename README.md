@@ -177,6 +177,14 @@ Baselines on the same split: predict the mean, MAE 8.651; linear fit on distance
 MAE 3.565. Training is deterministic for a given seed; the test suite trains twice and
 checks that the weights and MAE match.
 
+The committed artifacts regenerate from their seed, but not bit for bit on a different CPU
+architecture: the dataset comes out of torch's vectorised `exp`, whose last bit differs between
+arm64 and x86-64, so a value sitting on a rounding boundary rounds one way on each. The fixture
+records `distance_km` 8.5 where a Linux runner regenerates 8.499, and a six decimal statistic can
+land one unit apart. The tests that compare a regenerated artifact against a committed one therefore
+hold every number to one unit in the last place the producing code rounds to, declared per field,
+and still require the structure, the integers, the strings and the booleans to match exactly.
+
 ## API
 
 | method | path                   | auth | description |

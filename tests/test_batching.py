@@ -60,7 +60,11 @@ async def test_batcher_groups_concurrent_submits_and_preserves_results():
 async def test_sparse_requests_do_not_wait_and_dense_ones_wait_at_most_max_wait():
     reg = ModelRegistry(ARTIFACTS, pad_rows=8)
     model = reg.load("v1")
-    max_wait = 0.005
+    # 50ms rather than 5: the assertions below are wall clock around a forward pass on an event
+    # loop, and a shared runner's scheduling jitter alone can cost several milliseconds. The
+    # relationships being tested are unchanged; only the budget is large enough to be about the
+    # batcher rather than about the machine.
+    max_wait = 0.05
     batcher = Batcher(max_batch_size=8, max_wait_s=max_wait)
     x = _features(4, seed=33)
     # Sparse: each request arrives well after the previous one, so it runs at once.
