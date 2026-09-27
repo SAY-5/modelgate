@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 
 from modelgate.model.data import make_dataset
 from modelgate.model.stats import compute_training_stats
 from modelgate.serving import metrics
 from modelgate.serving.drift import DriftMonitor, psi
-from tests.conftest import ADMIN, ARTIFACTS, GOOD_INPUT
+from tests.conftest import ADMIN, ARTIFACTS, GOOD_INPUT, assert_reproduces
 
 MANIFEST = json.loads((ARTIFACTS / "manifest.json").read_text())
 TRAINING_STATS = MANIFEST["training_stats"]
+# The same manifest with every number kept as the decimal the file records, so a comparison can
+# hold the regenerated stats to the precision the artifact claims and no further.
+RECORDED = json.loads((ARTIFACTS / "manifest.json").read_text(), parse_float=Decimal)
 
 
 def _rows(n: int, seed: int) -> list[dict]:
@@ -40,8 +44,18 @@ def test_manifest_carries_training_stats_for_every_input():
     assert feats["pickup_zone_id"]["kind"] == "categorical"
     assert set(feats["pickup_zone_id"]["frequencies"]) == {str(z) for z in range(1, 13)}
     assert abs(feats["is_raining"]["frequencies"]["true"] - 0.2) < 0.02
-    # Recomputing from the seeded dataset reproduces the manifest exactly.
-    assert compute_training_stats(_rows(12000, MANIFEST["seed"])) == TRAINING_STATS
+    # Recomputing from the seeded dataset reproduces every figure the manifest records, to the
+    # last decimal it records. It is not asserted bit for bit: the dataset comes out of torch's
+    # vectorised exp, whose last bit differs between CPU architectures, so a value on a rounding
+    # boundary rounds one way on arm64 and the other on x86-64.
+    # modelgate/model/stats.py rounds every figure it reports to six decimals, the frequency and
+    # quantile tables included, so their category keys inherit their container's tolerance.
+    one_place = Decimal("0.000001")
+    tolerances = dict.fromkeys(
+        ["mean", "std", "min", "max", "bin_edges", "quantiles", "frequencies"], one_place
+    )
+    regenerated = compute_training_stats(_rows(12000, MANIFEST["seed"]))
+    assert_reproduces(regenerated, RECORDED["training_stats"], tolerances, "training_stats")
 
 
 def test_training_like_traffic_is_stable():
