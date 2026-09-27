@@ -339,7 +339,10 @@ test with a mid-run swap at 0 dropped requests before it was tagged.
   0.000001 for the training statistics, and 0.02 for the two eta fields derived from those
   inputs. Keys, field order, line count, integers, strings and booleans still have to match
   exactly, and a fractional number with no tolerance declared for it or a container above it
-  is refused. `tests/test_artifact_tolerance.py` pins what the comparison admits and rejects.
+  is refused. `tests/test_artifact_tolerance.py` pins what the comparison admits and rejects,
+  and `tests/measure_eta_shift.py` measures what the eta tolerance has to carry: one unit in
+  the last place of each input moves the reference eta by at most 0.0094 minutes and the
+  served prediction by at most 0.0028.
 - `test_healthy_canary_stays_active`, whose healthy v2 canary was rolled back on the CI
   runner, raises `latency_floor_ms` to 250 ms, and `test_slow_canary_rolls_back_on_latency`
   still proves the rule with a 4 ms delay injected into the candidate. The batching test's
