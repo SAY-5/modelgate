@@ -33,6 +33,9 @@ jobs:
       - name: Test
         run: uv run pytest -q
 
+      - name: Compose publication and startup contract
+        run: uv run pytest -q tests/test_compose.py
+
       - name: Load test with mid-run version swap
         run: uv run python -m loadtest.run --spawn-server --rps 150 --duration 12 --shadow-first --prewarm --canary-weight 0.1 --fail-on-drops
 
