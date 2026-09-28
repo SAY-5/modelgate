@@ -2,6 +2,7 @@
 
 UV ?= uv
 PORT ?= 8000
+export PORT
 DURATION ?= 20
 RPS ?= 200
 
@@ -26,7 +27,7 @@ artifacts/manifest.json:
 	$(UV) run python -m modelgate.model.train
 
 serve:
-	MODELGATE_ADMIN_TOKEN=$${MODELGATE_ADMIN_TOKEN:-dev-token} $(UV) run uvicorn modelgate.serving.app:app --host 0.0.0.0 --port $(PORT)
+	$(UV) run python -m modelgate.serving.startup
 
 loadtest: artifacts/manifest.json
 	$(UV) run python -m loadtest.run --spawn-server --port $(PORT) --rps $(RPS) --duration $(DURATION) --shadow-first

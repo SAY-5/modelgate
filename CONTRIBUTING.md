@@ -7,8 +7,9 @@ uv sync --extra dev
 make lint test
 ```
 
-Python 3.12 and [uv](https://docs.astral.sh/uv/) are the only prerequisites. Torch is
-pulled from the CPU wheel index, so the environment installs in under a minute.
+Use Python 3.12, [uv](https://docs.astral.sh/uv/) 0.11.7 (as pinned in CI), and Docker
+Compose for the resolved-configuration tests. These tests do not need a running Docker daemon.
+Torch is pulled from the CPU wheel index.
 
 ## Workflow
 

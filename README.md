@@ -87,9 +87,14 @@ Python 3.12, PyTorch (CPU), FastAPI, prometheus_client, Grafana, uv.
 
 ```bash
 uv sync --extra dev          # CPU torch from the PyTorch wheel index
-make test                    # 104 tests including the zero-drop swap tests
+make test                    # includes startup, Compose configuration and zero-drop swap tests
 make demo                    # start the server, 200 rps for 20 s, promote v2 at t+10 s
 ```
+
+The configuration tests require Docker Compose (no running daemon is needed). `make serve`
+starts the API on `127.0.0.1:8000`. When `MODELGATE_ADMIN_TOKEN` is unset, the launcher uses
+`dev-token` for the local demo; explicitly setting it to an empty string disables the admin
+API (503). To select a different local port, use `make serve PORT=8001`.
 
 `make demo` output from this machine (Apple M-series, single uvicorn worker):
 
@@ -159,6 +164,43 @@ docker compose up --build
 # drive traffic against the container and swap versions mid-run
 uv run python -m loadtest.run --url http://localhost:8000 --rps 200 --duration 60 --shadow-first
 ```
+
+Compose publishes all three ports on `127.0.0.1` by default. Inside the Docker network,
+the API still listens on `0.0.0.0:8000`, so Prometheus can scrape `modelgate:8000`.
+Prometheus and Grafana remain loopback-only even when remote API access is enabled.
+The bundled Grafana `admin` / `admin` login is for this private local demo only.
+
+#### Deliberate remote API testing
+
+Set `MODELGATE_ADMIN_TOKEN` to a unique, caller-managed random token through your shell's
+environment or secret-management tool before using either command:
+
+```bash
+# Refuses an unset, empty, whitespace-only, or known development token before listening.
+MODELGATE_HOST=0.0.0.0 make serve
+# Or publish only the container's API remotely; observability stays on loopback.
+MODELGATE_HOST=0.0.0.0 docker compose up --build
+```
+
+`MODELGATE_HOST` selects the native listener or the Compose **host publication** address.
+Only literal loopback IPs are trusted for development credentials; hostname aliases such as
+`localhost` require a configured non-default token too. Validation checks the publication
+address, not the container's internal listener. Direct Uvicorn or custom Docker invocations
+bypass this launcher and are your responsibility.
+
+This is an explicit development opt-in, not a production deployment configuration. Admin
+tokens protect `/admin/*`, not predictions, metrics, or health endpoints. Use TLS, a trusted
+network, appropriate firewall rules and rate limits before making the API reachable outside
+your host. Neither this token check nor a private bind substitutes for those controls.
+
+For remote observability, keep the ports private and use authenticated SSH forwarding:
+
+```bash
+ssh -N -L 127.0.0.1:3000:127.0.0.1:3000 -L 127.0.0.1:9090:127.0.0.1:9090 user@your-host
+```
+
+Then open the same local Grafana/Prometheus URLs. Compose configuration checks in this
+repository use an isolated environment and `--env-file /dev/null`; they never load your `.env`.
 
 ### Training
 
@@ -272,6 +314,8 @@ drawn as annotations across every time series.
 | variable | default | purpose |
 |----------|---------|---------|
 | `MODELGATE_ADMIN_TOKEN` | unset | Enables the admin API. |
+| `MODELGATE_HOST` | `127.0.0.1` | `make serve` listener / Compose API publication address. A non-loopback value requires a non-default admin token. |
+| `PORT` | `8000` | Native `make serve` port; Compose keeps port 8000. |
 | `MODELGATE_ARTIFACTS_DIR` | `artifacts` | Where `manifest.json` and `eta_*.pt` live. |
 | `MODELGATE_PRIMARY_VERSION` | lowest in manifest | Version loaded at startup. |
 | `MODELGATE_SHADOW_VERSION` | unset | Shadow version loaded at startup. |

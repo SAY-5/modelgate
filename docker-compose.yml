@@ -1,10 +1,14 @@
 services:
   modelgate:
     build: .
+    command: ["uv", "run", "--no-sync", "python", "-m", "modelgate.serving.startup", "--container"]
     ports:
-      - "8000:8000"
+      - target: 8000
+        published: "8000"
+        host_ip: ${MODELGATE_HOST:-127.0.0.1}
     environment:
-      MODELGATE_ADMIN_TOKEN: ${MODELGATE_ADMIN_TOKEN:-dev-token}
+      MODELGATE_ADMIN_TOKEN: ${MODELGATE_ADMIN_TOKEN-dev-token}
+      MODELGATE_HOST: ${MODELGATE_HOST:-127.0.0.1}
       MODELGATE_PRIMARY_VERSION: v1
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz')"]
@@ -17,14 +21,14 @@ services:
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     depends_on:
       - modelgate
 
   grafana:
     image: grafana/grafana:11.2.0
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
