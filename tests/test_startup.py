@@ -7,6 +7,7 @@ import signal
 import socket
 import subprocess
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -23,10 +24,16 @@ def clean_env(**overrides: str) -> dict[str, str]:
 
 
 @contextmanager
-def serve(tmp_path: Path, command: list[str] | None = None, **overrides: str):
+def serve(
+    tmp_path: Path,
+    command: list[str] | Callable[[int], list[str]] | None = None,
+    **overrides: str,
+):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
+    if callable(command):
+        command = command(port)
     log_path = tmp_path / "server.log"
     with log_path.open("w") as log:
         process = subprocess.Popen(

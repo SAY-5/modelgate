@@ -92,9 +92,11 @@ make demo                    # start the server, 200 rps for 20 s, promote v2 at
 ```
 
 The configuration tests require Docker Compose (no running daemon is needed). `make serve`
-starts the API on `127.0.0.1:8000`. When `MODELGATE_ADMIN_TOKEN` is unset, the launcher uses
+and `uv run modelgate serve` start the API on `127.0.0.1:8000`. When
+`MODELGATE_ADMIN_TOKEN` is unset, either launcher uses
 `dev-token` for the local demo; explicitly setting it to an empty string disables the admin
-API (503). To select a different local port, use `make serve PORT=8001`.
+API (503). To select a different local port, use `make serve PORT=8001` or
+`uv run modelgate serve --port 8001`. The CLI also accepts `--host` and `--log-level`.
 
 `make demo` output from this machine (Apple M-series, single uvicorn worker):
 
@@ -173,16 +175,19 @@ The bundled Grafana `admin` / `admin` login is for this private local demo only.
 #### Deliberate remote API testing
 
 Set `MODELGATE_ADMIN_TOKEN` to a unique, caller-managed random token through your shell's
-environment or secret-management tool before using either command:
+environment or secret-management tool before using any of these commands:
 
 ```bash
 # Refuses an unset, empty, whitespace-only, or known development token before listening.
 MODELGATE_HOST=0.0.0.0 make serve
+# The installed CLI enforces the same policy on its explicit --host argument.
+uv run modelgate serve --host 0.0.0.0
 # Or publish only the container's API remotely; observability stays on loopback.
 MODELGATE_HOST=0.0.0.0 docker compose up --build
 ```
 
-`MODELGATE_HOST` selects the native listener or the Compose **host publication** address.
+`MODELGATE_HOST` selects the Make listener or the Compose **host publication** address;
+the CLI uses `--host` instead.
 Only literal loopback IPs are trusted for development credentials; hostname aliases such as
 `localhost` require a configured non-default token too. Validation checks the publication
 address, not the container's internal listener. Direct Uvicorn or custom Docker invocations
@@ -365,11 +370,24 @@ reasoning behind the validation and metrics choices.
 | 4.0.0 | Micro-batching with padded forward passes for bit-identical results, adaptive wait, FIFO fairness; warm model pool with `POST /admin/warm` and LRU eviction of role-free versions. |
 | 5.0.0 | Sampled PII-free request log and `modelgate eval`: replay against two versions with MAE, calibration, divergence, and a logged-versus-replayed consistency check. |
 | 5.0.1 | A suite that passes on any host: regenerated artifacts compared within a tolerance declared per field, wider canary and batching budgets; the browser demo on Vite 7.3.6 with 0 npm audit findings. |
+| 5.0.2 | The installed `modelgate serve` CLI now shares the private default and remote-token policy already used by Make/Compose. |
 
 Every release passed `ruff check`, `ruff format --check`, the full test suite, and the load
 test with a mid-run swap at 0 dropped requests before it was tagged.
 
 ## Changelog
+
+### 5.0.2
+
+- Fixed the remaining `modelgate serve` entry point: its listener defaults to
+  `127.0.0.1`, and non-loopback `--host` values refuse unset, empty, whitespace-only
+  or development admin tokens before starting Uvicorn. The shared publication
+  validator is the same one used by the Make/Compose launcher.
+- Explicit host, port and log level remain supported. Caller-supplied tokens are
+  preserved literally; an explicitly empty local token still disables the admin API.
+- Regression coverage exercises actual CLI startup and authenticated HTTP access,
+  with a no-socket regression for the unsafe default and pre-launch rejection path.
+  This closes a launcher gap; it does not turn the demo into a production deployment.
 
 ### 5.0.1
 
