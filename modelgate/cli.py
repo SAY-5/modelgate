@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 
@@ -11,7 +12,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     serve = sub.add_parser("serve", help="run the serving API")
-    serve.add_argument("--host", default="0.0.0.0")
+    serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--log-level", default="info")
 
@@ -38,6 +39,15 @@ def main(argv: list[str] | None = None) -> int:
             eval_argv += ["--json", args.json]
         return eval_main(eval_argv)
     if args.command == "serve":
+        from modelgate.serving.startup import validate_publication
+
+        token = os.environ.get("MODELGATE_ADMIN_TOKEN", "dev-token")
+        try:
+            validate_publication(args.host, token)
+        except ValueError as error:
+            serve.error(str(error))
+        # Match the Make/Compose launcher without rewriting caller-configured tokens.
+        os.environ.setdefault("MODELGATE_ADMIN_TOKEN", token)
         import uvicorn
 
         uvicorn.run(
