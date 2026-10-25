@@ -371,11 +371,30 @@ reasoning behind the validation and metrics choices.
 | 5.0.0 | Sampled PII-free request log and `modelgate eval`: replay against two versions with MAE, calibration, divergence, and a logged-versus-replayed consistency check. |
 | 5.0.1 | A suite that passes on any host: regenerated artifacts compared within a tolerance declared per field, wider canary and batching budgets; the browser demo on Vite 7.3.6 with 0 npm audit findings. |
 | 5.0.2 | The installed `modelgate serve` CLI now shares the private default and remote-token policy already used by Make/Compose. |
+| 5.0.3 | Dependency patch: certifi 2026.10.19 and setuptools 84.1.0 in `uv.lock`, Vite 7.3.7 and source-map-js 1.2.2 in the browser demo; filelock stays at 3.32.5 because its fix is only in 4.2.1. |
 
 Every release passed `ruff check`, `ruff format --check`, the full test suite, and the load
 test with a mid-run swap at 0 dropped requests before it was tagged.
 
 ## Changelog
+
+### 5.0.3
+
+- `uv.lock` moves certifi from 2026.7.22 to 2026.10.19 (GHSA-6q48-6c7w-9gw2: the old
+  bundle trusted an emSign root whose revoked intermediates have compromised keys) and
+  setuptools from 84.0.0 to 84.1.0 (GHSA-xmj3-9gf7-h52w, a Windows-only path escape during
+  legacy wheel installation). Each moved with its own `--upgrade-package`, so torch 2.14.0
+  and every other locked package are unchanged.
+- filelock stays at 3.32.5. Its three advisories (GHSA-567q-5qvw-pf92, GHSA-9vhv-jxww-xfm5,
+  GHSA-v4x8-3wr5-3wq8) are fixed only in filelock 4.2.1, a new major version. It is locked
+  only as a dependency of torch; modelgate's own code does not import it. Two of the
+  advisories apply only on Windows, and the third concerns the SQLite-backed `ReadWriteLock`
+  and needs another local account that can create files in the lock's directory.
+- `web/package-lock.json` moves Vite from 7.3.6 to 7.3.7 (GHSA-587h-7wmj-h5pm,
+  GHSA-698v-4r3x-3vcv, GHSA-r825-w8mm-5pxw, GHSA-9jrq-w75r-8gcw, GHSA-rq7h-c2jc-7f22) and
+  source-map-js from 1.2.1 to 1.2.2 (GHSA-68fv-2mgg-jv7q). These advisories concern the Vite
+  development server and source map parsing in the build toolchain, not the static files the
+  built demo serves.
 
 ### 5.0.2
 
