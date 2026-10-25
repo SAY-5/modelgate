@@ -372,11 +372,22 @@ reasoning behind the validation and metrics choices.
 | 5.0.1 | A suite that passes on any host: regenerated artifacts compared within a tolerance declared per field, wider canary and batching budgets; the browser demo on Vite 7.3.6 with 0 npm audit findings. |
 | 5.0.2 | The installed `modelgate serve` CLI now shares the private default and remote-token policy already used by Make/Compose. |
 | 5.0.3 | Dependency patch: certifi 2026.10.19 and setuptools 84.1.0 in `uv.lock`, Vite 7.3.7 and source-map-js 1.2.2 in the browser demo; filelock stays at 3.32.5 because its fix is only in 4.2.1. |
+| 5.0.4 | Dependency patch: filelock 4.2.1 in `uv.lock`, the major-version fix for the three advisories 5.0.3 held back; no other package moved. |
 
 Every release passed `ruff check`, `ruff format --check`, the full test suite, and the load
 test with a mid-run swap at 0 dropped requests before it was tagged.
 
 ## Changelog
+
+### 5.0.4
+
+- `uv.lock` moves filelock from 3.32.5 to 4.2.1, which fixes GHSA-567q-5qvw-pf92,
+  GHSA-9vhv-jxww-xfm5 and GHSA-v4x8-3wr5-3wq8, the three advisories 5.0.3 held back because
+  their only fix is a new major version. torch 2.14.0 is the only locked package that requires
+  filelock, with no version bound; a scan of the Python sources in the locked torch 2.14.0
+  macOS wheel found it using only `FileLock`, `BaseFileLock` and `Timeout`, and filelock's
+  4.0.0 break is in the `SoftReadWriteLock` on-disk protocol. modelgate's own code does not
+  import filelock, and no other locked package moved.
 
 ### 5.0.3
 
